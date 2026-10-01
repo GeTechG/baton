@@ -110,3 +110,12 @@ test('repo map: files for a small repo, directories at the deepest depth that fi
   const shallow = repoMap(big, 1000).split('\n');
   assert.deepEqual(shallow, ['pkg0/src/', 'pkg1/src/', 'pkg2/src/', 'pkg3/src/', 'pkg4/src/', 'pkg5/src/', 'pkg6/src/']);
 });
+
+test('watch: one line per tool call, quiet on clean results, loud on failures', async () => {
+  const { line } = await import('./watch.mjs');
+  const at = { created_at: '2026-01-01T10:20:30.000Z' };
+  assert.match(line('K-1', { ...at, type: 'tool_use', tool: 'Bash', input: { description: 'Run tests', command: 'npm test' } }), /10:20:30 K-1 Bash Run tests$/);
+  assert.equal(line('K-1', { ...at, type: 'tool_result', output: 'ok 12 passed' }), null);
+  assert.match(line('K-1', { ...at, type: 'tool_result', output: 'Error: boom' }), /✖ Error: boom/);
+  assert.match(line('K-1', { ...at, type: 'text', content: 'Opening the PR' }), /Opening the PR/);
+});
