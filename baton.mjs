@@ -135,7 +135,7 @@ export function repoMap(paths, budget = 40000) {
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
 }
 
-// ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, session, wt, n } } ----
+// ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, session, wt, n, total, pos } } ----
 const RUNS = `${DIR}/runs.json`;
 const loadRuns = () => try_(() => JSON.parse(readFileSync(RUNS, 'utf8'))) ?? {};
 const saveRuns = (runs) => writeFileSync(RUNS, JSON.stringify(runs));
@@ -171,9 +171,9 @@ function start(p, i, runs) {
   const child = spawn(bin, [...args, first ? '--session-id' : '--resume', r.session, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
     env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: `${DIR}/bin:${process.env.PATH}` }) });
   child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
-  child.unref(); r.pid = child.pid; r.n++;
+  child.unref(); r.pid = child.pid; r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off or park; total names the run
   saveRuns(runs); // persist right away: a later throw in this tick must not orphan the process
-  log(null, 'run', i.identifier, `#${r.n}`, first ? 'new session' : 'resumed', `pid ${r.pid}`, r.wt);
+  log(null, 'run', i.identifier, `#${r.total}`, first ? 'new session' : 'resumed', `pid ${r.pid}`, r.wt);
 }
 // The tracker's run log of an issue = the readable part of its agent log, forwarded once per tick.
 function forward(runs) {
@@ -181,7 +181,7 @@ function forward(runs) {
     const f = `${DIR}/logs/${key}.log`;
     if (!existsSync(f) || statSync(f).size <= (r.pos ?? 0)) continue;
     const { pos, out } = tail(readFileSync(f), r.pos ?? 0), [bin, args] = LIFIC();
-    if (out.length && try_(() => execFileSync(bin, [...args, 'issue', 'log', 'add', key, `--source=run ${r.n}`], { input: out.join('\n'), stdio: ['pipe', 'pipe', 'pipe'] })) == null) continue;
+    if (out.length && try_(() => execFileSync(bin, [...args, 'issue', 'log', 'add', key, `--source=run ${r.total}`], { input: out.join('\n'), stdio: ['pipe', 'pipe', 'pipe'] })) == null) continue;
     r.pos = pos; saveRuns(runs);
   }
 }
