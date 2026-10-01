@@ -1,7 +1,7 @@
 // node --test bridge.test.mjs — the bridge's pure scheduling logic (no Multica, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep } from './baton.mjs';
 
 const P = { footprint: 'fp-id', 'blocked-by': 'bb-id' };
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id,
@@ -118,4 +118,12 @@ test('watch: one line per tool call, quiet on clean results, loud on failures', 
   assert.equal(line('K-1', { ...at, type: 'tool_result', output: 'ok 12 passed' }), null);
   assert.match(line('K-1', { ...at, type: 'tool_result', output: 'Error: boom' }), /✖ Error: boom/);
   assert.match(line('K-1', { ...at, type: 'text', content: 'Opening the PR' }), /Opening the PR/);
+});
+
+test('fresh label: rerun when idle, wait while a run is active, defer to assignment when parked', () => {
+  const i = (labels) => ({ labels });
+  assert.equal(freshStep(i([]), true, 0), null);
+  assert.equal(freshStep(i(['fresh']), true, 0), 'rerun');
+  assert.equal(freshStep(i(['fresh']), true, 1), 'wait');
+  assert.equal(freshStep(i(['fresh', 'needs-human']), false, 0), 'on-assign');
 });

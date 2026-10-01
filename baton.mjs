@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.maxInFlight ??= 4; CFG.tickSec ??= 5;
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.maxInFlight ??= 4; CFG.tickSec ??= 5;
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.multica) CFG.multica.bin = resolve(ROOT, CFG.multica.bin);
 
@@ -42,6 +42,10 @@ export const meta = (i, P) => ({ ...i, labels: (i.labels ?? []).map((l) => l.nam
   footprint: i.properties?.[P.footprint] == null ? null : list(i.properties[P.footprint]), blockedBy: list(i.properties?.[P['blocked-by']]), notified: !!i.properties?.[P.notified] });
 // Human-label edge -> 'notify' (label appeared, not yet announced) | 'clear' (label gone, re-arm) | null.
 export const notifyStep = (i) => (i.labels.includes(CFG.humanLabel) === i.notified ? null : i.notified ? 'clear' : 'notify');
+// cfg.freshLabel on an issue = "its next run starts with a clean session and working directory" (the UI's Retry
+// always resumes). 'rerun' now | 'wait' for the active run to end | 'on-assign' when the scheduler next assigns it.
+export const freshStep = (i, isAssigned, activeRuns) =>
+  (!i.labels.includes(CFG.freshLabel) ? null : !isAssigned ? 'on-assign' : activeRuns ? 'wait' : 'rerun');
 // null = ready to assign now; otherwise why not. statusOf(key) -> issue status.
 export function whyNot(i, flight, statusOf, max = CFG.maxInFlight) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
@@ -94,6 +98,14 @@ export function repoMap(paths, budget = 40000) {
     if (dirs.length <= budget) return dirs;
   }
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
+}
+
+function restartFresh(i) { // fresh session + workdir; the agent rebuilds state from the branch, PR and issue
+  m('issue', 'rerun', i.identifier);
+  const id = mj('label', 'list').find((l) => l.name === CFG.freshLabel)?.id;
+  if (id) m('issue', 'label', 'remove', i.identifier, id);
+  i.labels = i.labels.filter((l) => l !== CFG.freshLabel);
+  log(null, 'fresh', i.identifier, 'rerun with a clean session');
 }
 
 const assigned = (i, p) => i.assignee_type === 'agent' && i.assignee_id === p?.agent;
@@ -219,6 +231,11 @@ function tick() {
     } else if (step === 'clear') m('issue', 'property', 'unset', i.identifier, '--name', 'notified');
   }
 
+  for (const i of issues.filter((x) => !CLOSED.includes(x.status) && assigned(x, projects[x.project_id]) && x.labels.includes(CFG.freshLabel))) {
+    const step = freshStep(i, true, mj('issue', 'runs', i.identifier, '--active').length);
+    if (step === 'rerun') restartFresh(i); else log(`f${i.identifier}`, 'fresh', i.identifier, 'waits for the active run to end');
+  }
+
   // Park: an assigned issue that waits on a blocker or a human leaves the flight once its run has ended.
   for (const i of issues.filter((x) => assigned(x, projects[x.project_id]) && !CLOSED.includes(x.status))) {
     const why = whyNot(i, [], statusOf);
@@ -237,7 +254,8 @@ function tick() {
     const why = whyNot(i, flight, statusOf);
     if (why) { log(i.identifier, 'wait', i.identifier, why); continue; }
     if (i.status === 'blocked') m('issue', 'status', i.identifier, 'todo', '--no-start');
-    m('issue', 'assign', i.identifier, '--to-id', p.agent);
+    if (freshStep(i, false, 0) === 'on-assign') { m('issue', 'assign', i.identifier, '--to-id', p.agent, '--no-start'); restartFresh(i); }
+    else m('issue', 'assign', i.identifier, '--to-id', p.agent);
     flight.push(i);
     log(i.identifier, 'assign', i.identifier, p.repo, `footprint=${i.footprint.join(',')}`);
   }

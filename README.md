@@ -9,6 +9,7 @@ Multica runs the agents (local daemon, worktrees, UI); baton decides **when** ea
 - **Merge queue (Bors-style):** agents only open PRs and set `in_review`. Green PRs are merged `--no-ff` into
   `batch/<ts>` on top of base; base fast-forwards only to a batch whose exact tree passed CI. Red batch → bisect;
   a single red PR goes back to its agent. `main` is never red.
+- **Fresh start:** label `fresh` on an issue = its next run starts with a clean session and working directory (baton reruns it and removes the label).
 - **Human gates:** `gate:spec` issues post a plan and park on `needs-human`; swap it for `spec:approved` to proceed.
 
 ## Run
