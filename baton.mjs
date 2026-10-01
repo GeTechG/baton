@@ -262,7 +262,8 @@ function tick() {
 
   // Assign when ready (oldest first).
   const flight = issues.filter((i) => assigned(i, projects[i.project_id]) && !CLOSED.includes(i.status));
-  for (const i of issues.filter((x) => !x.assignee_id && !CLOSED.includes(x.status) && x.status !== 'in_review')) {
+  // backlog = not ready yet (the human moves it to todo); Multica starts no run for it, so assigning would only hold a flight slot.
+  for (const i of issues.filter((x) => !x.assignee_id && !CLOSED.includes(x.status) && !['in_review', 'backlog'].includes(x.status))) {
     const p = projects[i.project_id];
     if (i.labels.includes(CFG.humanLabel)) continue; // human-owned (spec approval, QA): no footprint call, no assign
     i.footprint ??= estimateFootprint(p, i);

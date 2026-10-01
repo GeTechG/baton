@@ -42,6 +42,7 @@ keep you from fighting the scheduler.
 
 baton assigns an unassigned, open issue when all of these hold:
 
+- its status is not `backlog` (backlog = not ready; a human moves it to `todo`),
 - every issue in its `blocked-by` property is done (cross-project keys work),
 - it has no `needs-human` label,
 - its `footprint` does not overlap an in-flight issue of the same project (path-prefix match),

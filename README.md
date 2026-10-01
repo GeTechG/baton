@@ -5,7 +5,7 @@ Multica runs the agents (local daemon, worktrees, UI); baton decides **when** ea
 
 - **Scheduling (stateless):** humans file issues *unassigned*; baton assigns the project's agent only when the issue's
   `blocked-by` issues are done, it has no `needs-human` label, and its `footprint` (Haiku-estimated if missing) doesn't
-  overlap an in-flight issue. Cross-project blockers work the same way.
+  overlap an in-flight issue. Cross-project blockers work the same way. `backlog` issues are never picked up: move them to `todo`.
 - **Merge queue (Bors-style):** agents only open PRs and set `in_review`. Green PRs are merged `--no-ff` into
   `batch/<ts>` on top of base; base fast-forwards only to a batch whose exact tree passed CI. Red batch → bisect;
   a single red PR goes back to its agent. `main` is never red.
