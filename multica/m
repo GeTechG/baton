@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Multica CLI wrapper for baton's local instance. Binary: multica/bin/multica (GitHub Releases of multica-ai/multica).
+D=$(cd "$(dirname "$0")" && pwd)
+exec "$D/bin/multica" --profile "${MULTICA_PROFILE:-baton}" --server-url "${MULTICA_SERVER:-http://localhost:8080}" "$@"

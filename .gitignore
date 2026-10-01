@@ -1,0 +1,8 @@
+config.json
+state/
+logs/
+*.log
+multica/bin/
+multica/.env
+.env
+local/

@@ -1,0 +1,17 @@
+name: test
+on: [pull_request, push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: fetch private submodule via read-only deploy key
+        env: { KEY: "${{ secrets.LIB_DEPLOY_KEY }}" }
+        run: |
+          mkdir -p ~/.ssh && echo "$KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          git submodule update --init
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node --test

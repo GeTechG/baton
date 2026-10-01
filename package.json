@@ -1,0 +1,1 @@
+{ "name": "baton", "private": true, "type": "module", "scripts": { "start": "node baton.mjs", "test": "node --test baton.test.mjs" } }
