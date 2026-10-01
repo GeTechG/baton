@@ -1,7 +1,7 @@
 // node --test bridge.test.mjs — the bridge's pure scheduling logic (no Multica, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, brief } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief } from './baton.mjs';
 
 const P = { footprint: 'fp-id', 'blocked-by': 'bb-id' };
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id,
@@ -132,6 +132,10 @@ test('fresh label: rerun when idle, wait while a run is active, defer to assignm
 test('release gate: tag of the landed commit, none unless configured', () => {
   assert.equal(releaseTag({ release: 'build-{sha}' }, 'abc'), 'build-abc');
   assert.equal(releaseTag({}, 'abc'), null);
+  assert.equal(releaseLate({ landed: 0 }, 59 * 60e3), false);
+  assert.equal(releaseLate({ landed: 0 }, 61 * 60e3), true);
+  assert.equal(releaseLate({ landed: 0 }, 11 * 60e3, 10), true);
+  assert.equal(releaseLate({ landed: 0, late: true }, 61 * 60e3), false); // told once
 });
 
 test('brief: {{projects}} lists base branch, PR branch and check of every project the agent serves', () => {

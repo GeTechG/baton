@@ -90,6 +90,8 @@ export function batchStep(batch, base, checks, ready, names = 'all') {
 // cfg project.release, e.g. 'build-{sha}': the GitHub release that must exist for the landed commit before its issues
 // close (a consumer pins that commit and needs the build). null = no release gate.
 export const releaseTag = (p, sha) => p.release?.replace('{sha}', sha) ?? null;
+// A landed batch whose release has not shown up in time (once per batch; batch.landed = ms it landed).
+export const releaseLate = (batch, now, min = 60) => !batch.late && now - batch.landed > min * 60e3;
 // Agent instructions with {{projects}} replaced by what a shared, project-independent worker cannot guess per repo.
 export const brief = (text, ps) => text.replace('{{projects}}', ps.map((p) => `- ${p.repo}: base branch \`${p.base}\`, ` +
   `PR branch \`${p.branchPrefix}<KEY>\`, check: ${p.check ? `\`${p.check}\`` : 'none configured'}`).join('\n'));
@@ -178,10 +180,17 @@ const drop = (p, git, batch) => { try_(() => git('push', '-q', 'origin', '--dele
 
 function land(p, git, batch, base, byKey) {
   if (base !== batch.sha && !batch.landed) git('push', '-q', 'origin', `${batch.sha}:refs/heads/${p.base}`); // non-force: fast-forward or fail
-  if (!batch.landed) writeFileSync(stateFile(p), JSON.stringify({ ...batch, landed: true })); // base may move on while a release is awaited
+  if (!batch.landed) writeFileSync(stateFile(p), JSON.stringify(batch = { ...batch, landed: Date.now() })); // base may move on while a release is awaited
   const tag = releaseTag(p, batch.sha);
   if (tag && try_(() => gh('release', 'view', tag, '-R', p.repo, '--json', 'isDraft', '-q', '.isDraft')) !== 'false') {
-    return log(`rel${p.repo}`, 'landed, waiting for release', p.repo, tag); // ponytail: waits forever if the build fails; add a timeout + needs-human if it happens
+    if (releaseLate(batch, Date.now(), p.releaseTimeoutMin)) { // the build probably failed: tell the human once, keep waiting
+      const why = `release ${tag} of ${p.repo} is still missing ${p.releaseTimeoutMin ?? 60} min after landing on ${p.base}`;
+      for (const pr of batch.prs) m('issue', 'comment', 'add', pr.key, '--content', `Bridge: ${why}. Re-run its build; this issue closes once the release exists.`);
+      if (CFG.notify?.ntfy) try_(() => run('curl', ['-fsS', '-m', '10', '-H', `Title: ${p.repo} release missing`, '-d', why, CFG.notify.ntfy]));
+      writeFileSync(stateFile(p), JSON.stringify({ ...batch, late: true }));
+      log(null, 'release late', p.repo, tag);
+    }
+    return log(`rel${p.repo}`, 'landed, waiting for release', p.repo, tag);
   }
   for (const pr of batch.prs) {
     let state = null, ref = null; // GitHub marks the PR merged once its head is reachable from base (asynchronously)

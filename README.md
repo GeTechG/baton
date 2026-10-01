@@ -12,7 +12,7 @@ Multica runs the agents (local daemon, worktrees, UI); baton decides **when** ea
 - **Post-landing steps:** label `after-landing` on an issue = after its PR lands baton hands it back to the agent (`in_progress` + a comment) instead of closing it; the agent sets `done`.
 - **Fresh start:** label `fresh` on an issue = its next run starts with a clean session and working directory (baton reruns it and removes the label).
 - **Release gate:** `"release": "build-{sha}"` on a project = after its batch lands, the issues stay `in_review` (and the
-  queue of that repo waits) until that GitHub release exists for the landed commit — for repos whose consumers pin a commit and need its build.
+  queue of that repo waits) until that GitHub release exists for the landed commit (after `releaseTimeoutMin`, default 60, baton comments on the issues and pings ntfy once, then keeps waiting) — for repos whose consumers pin a commit and need its build.
 - **Human gates:** `gate:spec` issues post a plan and park on `needs-human`; swap it for `spec:approved` to proceed.
 
 ## Run
