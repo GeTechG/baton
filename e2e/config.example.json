@@ -1,0 +1,20 @@
+{
+  "lific": { "bin": "bin/lific", "url": "http://127.0.0.1:3456" },
+  "stateDir": "state",
+  "tickSec": 5,
+  "maxInFlight": 4,
+  "humanLabel": "needs-human",
+  "agent": { "cmd": ["claude", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto", "--model", "sonnet"] },
+  "projects": {
+    "app": {
+      "repo": "GeTechG/orch-spike-app", "base": "main", "branchPrefix": "mc/", "batchPrefix": "batch/",
+      "checks": "all", "maxBatch": 8, "instructions": "agents/default.md",
+      "footprintHint": "Convention: new tests go in a NEW test file named after the feature (test/<feature>.test.js); list shared test files only if the task edits existing tests."
+    },
+    "lib": {
+      "repo": "GeTechG/orch-spike-lib", "base": "main", "branchPrefix": "mc/", "batchPrefix": "batch/",
+      "checks": "all", "maxBatch": 8, "instructions": "agents/default.md",
+      "footprintHint": "Convention: new tests go in a NEW test file named after the feature (test/<feature>.test.js); list shared test files only if the task edits existing tests."
+    }
+  }
+}

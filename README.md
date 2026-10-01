@@ -1,47 +1,61 @@
 # baton
 
-Scheduler + batch merge queue on top of a self-hosted [Multica](https://github.com/multica-ai/multica).
-Multica runs the agents (local daemon, worktrees, UI); baton decides **when** each issue runs and **what** reaches `main`.
+Scheduler, agent runner and batch merge queue on top of [Lific](https://github.com/VoidNullable/lific), a single-binary
+local issue tracker. Lific holds the issues and is the UI; baton decides **when** each issue runs, runs the coding agent
+for it in a git worktree of your own checkout, and decides **what** reaches `main`.
 
-- **Scheduling (stateless):** humans file issues *unassigned*; baton assigns the project's agent only when the issue's
-  `blocked-by` issues are done, it has no `needs-human` label, and its `footprint` (Haiku-estimated if missing) doesn't
-  overlap an in-flight issue. Cross-project blockers work the same way. `backlog` issues are never picked up: move them to `todo`.
-- **Merge queue (Bors-style):** agents only open PRs and set `in_review`. Green PRs are merged `--no-ff` into
+- **Scheduling (stateless):** humans file issues as `todo`; baton moves one to `active` and starts its agent only when
+  every issue that blocks it (Lific's native "blocked by" links, across projects too) is done, it has no `needs-human`
+  label, and its footprint (the `footprint: a, b` line of its description — Haiku-estimated and appended if missing)
+  doesn't overlap an in-flight issue. `backlog` issues are never picked up: move them to `todo`.
+- **Runs:** one git worktree and one agent session per issue, both kept until the issue closes, so a later run resumes
+  the conversation and reuses the build output. The worktree hangs off the project's local checkout (`path`) at
+  `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. An `active` issue without the
+  `in-review` label is the agent's to move: baton starts it again whenever its process has ended, parks it back to
+  `todo` while it waits on a blocker or a human, and after `maxRuns` (default 3) runs in a row with nothing to show
+  adds `needs-human` instead of burning tokens.
+- **Merge queue (Bors-style):** agents only open PRs and add the `in-review` label. Green PRs are merged `--no-ff` into
   `batch/<ts>` on top of base; base fast-forwards only to a batch whose exact tree passed CI. Red batch → bisect;
   a single red PR goes back to its agent. `main` is never red.
-- **Post-landing steps:** label `after-landing` on an issue = after its PR lands baton hands it back to the agent (`in_progress` + a comment) instead of closing it; the agent sets `done`.
-- **Fresh start:** label `fresh` on an issue = its next run starts with a clean session and working directory (baton reruns it and removes the label).
-- **Release gate:** `"release": "build-{sha}"` on a project = after its batch lands, the issues stay `in_review` (and the
+- **Post-landing steps:** label `after-landing` on an issue = after its PR lands baton hands it back to the agent (drops `in-review` + a comment) instead of closing it; the agent sets `done`.
+- **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both and removes the label; unpushed work in the old worktree is lost).
+- **Release gate:** `"release": "build-{sha}"` on a project = after its batch lands, the issues stay in review (and the
   queue of that repo waits) until that GitHub release exists for the landed commit (after `releaseTimeoutMin`, default 60, baton comments on the issues and pings ntfy once, then keeps waiting) — for repos whose consumers pin a commit and need its build.
 - **Human gates:** `gate:spec` issues post a plan and park on `needs-human`; swap it for `spec:approved` to proceed.
 
 ## Run
-1. Multica: `cp multica/.env.example multica/.env` (set secrets), `docker compose -p baton -f multica/docker-compose.yml up -d`;
-   put the CLI binary at `multica/bin/multica`, log in (`multica/m login`), start the daemon, create one project per repo + an agent.
-2. `cp e2e/config.json config.json` and edit: repos, agent ids, checks, batch/in-flight caps, footprint hint, instructions file.
-3. `npm start` (or `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
+1. Lific: put the binary at `bin/lific`, `bin/lific init` (config, database, your admin account, a user service on
+   `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human`, `gate:spec`,
+   `spec:approved`, `in-review`, `fresh`, `after-landing` in each, and two bot users with an API key each
+   (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
+2. `.env` (gitignored): `LIFIC_API_KEY=` baton's key, `AGENT_LIFIC_API_KEY=` the agents' key, `AGENT_GH_TOKEN=` the
+   GitHub token agents push with. Every `AGENT_X` reaches the agent processes as `X`; baton itself uses the machine's `gh` login.
+3. `cp e2e/config.example.json config.json` and edit: repos, local checkouts, checks, batch/in-flight caps, footprint hint, instructions file.
+4. `scripts/up.sh` (or, with `.env` exported, `npm start` / `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
-`scripts/` wraps this for a single-machine instance: `up.sh` (containers → daemon → baton, idempotent), `down.sh`
-(`--all` also stops the containers), `status.sh`, `login-code.sh` (the web UI's one-time login code) and `agent-env.sh`
-(puts `GH_TOKEN` from `.env` into every agent's custom env).
+`scripts/`: `up.sh` (checks the tracker, starts the baton loop, idempotent), `down.sh` (`--all` also kills the agent
+runs) and `status.sh`.
 
 ## Adding a project
 One entry in `config.json` `projects`: `repo`, `base` (any branch — `main`, `development`, …), `branchPrefix`, `batchPrefix`,
 `checks` (`"all"`, a list of check names, or `"none"` for a repo without CI — turn it on once the repo has CI), `maxBatch`,
-`agent`, `instructions`, and optionally `prChecks`, `check` (the command the agent runs before pushing), `release`, `footprintHint`.
+`instructions`, and optionally `path` (your local checkout of the repo — issue worktrees are made from it; without it
+baton keeps its own clone under `state/src/`), `worktrees` (where they go; default `<path>.wt`), `prChecks`, `check` (the command the agent runs before pushing), `release`, `footprintHint`.
 
-One agent can serve every project: `agents/default.md` is a project-independent worker that takes the process from the
-repo's own `AGENTS.md`. `{{projects}}` in an instructions file is replaced on start with one line per project of that
-agent — repo, base branch, PR branch, `check` — so nothing per-project is hardcoded in the text. A project that needs
-its own workflow (OpenSpec, …) gets its own agent and instructions file.
+The agent is whatever `agent.cmd` in `config.json` starts (default: Claude Code, headless, stream-json into
+`state/logs/<KEY>.log`); baton appends `--session-id <uuid>` on an issue's first run and `--resume <uuid>` after that,
+then the prompt. `agents/default.md` is a project-independent worker that takes the process from the repo's own
+`AGENTS.md`. `{{projects}}` in an instructions file is replaced with one line per project — key prefix, repo, base
+branch, PR branch, `check` — so nothing per-project is hardcoded in the text. A project that needs its own workflow
+(OpenSpec, …) gets its own instructions file.
 Nothing project-specific lives in this repo: `config.json`, `.env` and your instruction files in `local/` are gitignored.
 
 ## Agent skill
-`skills/baton/SKILL.md` tells any coding agent (Claude Code, Codex, opencode, …) that a repo is run by baton + Multica
+`skills/baton/SKILL.md` tells any coding agent (Claude Code, Codex, opencode, …) that a repo is run by baton + Lific
 and what not to do by hand. Install: `npx skills add GeTechG/baton` (add `-g` for all your projects).
 
 ## Tests
-- `node watch.mjs` — live view of what every in-flight agent is doing (run it in a spare terminal pane).
+- `node watch.mjs` — live view of what every running agent is doing (run it in a spare terminal pane).
 - `npm test` — pure logic (footprints, readiness, batch decisions).
 - `e2e/` — the end-to-end bench on throwaway repos `GeTechG/orch-spike-{app,lib}`: `e2e/SCENARIO.md`, `e2e/reset.sh`.
-  Scripts there hold instance-specific Multica ids — refresh them after re-creating the instance.
+  Its scripts expect projects `app` (prefix `APP`) and `lib` (`LIB`) in the tracker.
