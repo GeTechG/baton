@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.maxInFlight ??= 4; CFG.tickSec ??= 5;
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.maxInFlight ??= 4; CFG.tickSec ??= 5;
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.multica) CFG.multica.bin = resolve(ROOT, CFG.multica.bin);
 
@@ -170,7 +170,7 @@ function form(p, git, prs, byKey, base) {
 }
 const drop = (p, git, batch) => { try_(() => git('push', '-q', 'origin', '--delete', batch.branch)); rmSync(stateFile(p), { force: true }); };
 
-function land(p, git, batch, base) {
+function land(p, git, batch, base, byKey) {
   if (base !== batch.sha) git('push', '-q', 'origin', `${batch.sha}:refs/heads/${p.base}`); // non-force: fast-forward or fail
   for (const pr of batch.prs) {
     let state = null, ref = null; // GitHub marks the PR merged once its head is reachable from base (asynchronously)
@@ -178,9 +178,13 @@ function land(p, git, batch, base) {
       ({ state, headRefName: ref } = ghj('pr', 'view', String(pr.number), '-R', p.repo, '--json', 'state,headRefName'));
     }
     if (state === 'OPEN') gh('pr', 'close', String(pr.number), '-R', p.repo, '--comment', `bridge: landed on ${p.base} in ${batch.sha}`);
-    m('issue', 'status', pr.key, 'done', '--no-start');
+    // cfg.afterLandLabel on an issue = its agent has post-landing steps: hand it back instead of closing; the agent sets done.
+    const after = byKey[pr.key]?.labels.includes(CFG.afterLandLabel);
+    m('issue', 'status', pr.key, after ? 'in_progress' : 'done', '--no-start');
+    if (after) m('issue', 'comment', 'add', pr.key, '--content', `Bridge: PR #${pr.number} landed on ${p.base} in ${batch.sha}. ` +
+      `Do your post-landing steps now, comment the result, then set this issue done.`);
     try_(() => git('push', '-q', 'origin', '--delete', ref));
-    log(null, 'merged', p.repo, `#${pr.number}`, pr.key, `(${state})`, '-> done');
+    log(null, 'merged', p.repo, `#${pr.number}`, pr.key, `(${state})`, after ? '-> after-landing' : '-> done');
   }
   drop(p, git, batch);
   log(null, 'landed', p.repo, batch.branch, batch.sha.slice(0, 7));
@@ -199,7 +203,7 @@ function refinery(p, byKey, projectId) {
   const step = batchStep(batch, base, checks, c.ready, p.checks);
   if (step.act === 'wait') log(`q${p.repo}`, 'batch pending', p.repo, batch.branch);
   if (step.act === 'form') form(p, git, step.prs, byKey, base);
-  if (step.act === 'land') land(p, git, batch, base);
+  if (step.act === 'land') land(p, git, batch, base, byKey);
   if (step.act === 'rebuild') { log(null, 'rebuild', p.repo, batch.branch, `${p.base} moved`); drop(p, git, batch); }
   if (step.act === 'sendback') { drop(p, git, batch); sendBack(p, batch.prs[0], byKey[batch.prs[0].key], `fails CI together with ${p.base}`); }
   if (step.act === 'bisect') {
