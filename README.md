@@ -21,6 +21,10 @@ Multica runs the agents (local daemon, worktrees, UI); baton decides **when** ea
 2. `cp e2e/config.json config.json` and edit: repos, agent ids, checks, batch/in-flight caps, footprint hint, instructions file.
 3. `npm start` (or `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
+`scripts/` wraps this for a single-machine instance: `up.sh` (containers → daemon → baton, idempotent), `down.sh`
+(`--all` also stops the containers), `status.sh`, `login-code.sh` (the web UI's one-time login code) and `agent-env.sh`
+(puts `GH_TOKEN` from `.env` into every agent's custom env).
+
 ## Adding a project
 One entry in `config.json` `projects`: `repo`, `base` (any branch — `main`, `development`, …), `branchPrefix`, `batchPrefix`,
 `checks` (`"all"`, a list of check names, or `"none"` for a repo without CI — turn it on once the repo has CI), `maxBatch`,

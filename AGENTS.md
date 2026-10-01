@@ -4,7 +4,7 @@ baton is the scheduler + merge queue that may have assigned you this very issue 
 
 - **A live instance is off limits.** A checkout of this repo outside your own working directory may be the one a running
   scheduler was started from: treat it as read-only. Never edit files or run state-changing git there, never read `.env`,
-  never start, stop or restart baton, the Multica daemon or the containers (`local/up.sh`, `local/down.sh`,
+  never start, stop or restart baton, the Multica daemon or the containers (`scripts/up.sh`, `scripts/down.sh`,
   `docker compose`), and never run `node baton.mjs` (even `--once`) or anything under `e2e/` — they act on a real
   Multica workspace and real GitHub repos. `node watch.mjs` and read-only `multica … list/get` are fine.
 - Read `README.md` first. Keep the style: plain Node ESM, zero dependencies, `baton.mjs` stays one compact file,
