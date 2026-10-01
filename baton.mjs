@@ -2,7 +2,7 @@
 // Scheduler, agent runner and batch merge queue between Lific (the tracker) and GitHub; everything project-specific
 // is in config.json ($BATON_CONFIG). Humans file issues as `todo`; baton alone moves one to `active`, gives it a git
 // worktree off the project's local checkout and runs the agent there (one worktree and one agent session per issue,
-// kept until the issue closes). Native "blocked by" links and the text property `footprint` gate readiness;
+// kept until the issue closes; the issue is assigned to cfg.agent.user and its run log shows what the agent does). Native "blocked by" links and the text property `footprint` gate readiness;
 // cfg.humanLabel parks; status in_review = the agent handed off a PR on <branchPrefix><KEY>.
 // Queue (Bors-style): green PRs merge --no-ff into batch/<ts> on base; base fast-forwards only to a batch whose exact tree
 // passed CI; red -> bisect. Batch cached in batch-<repo>.json, recoverable from the remote branch's merge subjects.
@@ -10,16 +10,17 @@
 // serial bisect, a run is "alive" while its pid exists (a reboot can recycle it); refine when they hurt.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { plain, say } from './watch.mjs';
 
 // Relative paths in the config (lific.bin, stateDir, instructions, path, worktrees) resolve against the baton checkout.
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
 CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.maxInFlight ??= 4; CFG.maxRuns ??= 3; CFG.tickSec ??= 5;
-CFG.agent ??= {}; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
+CFG.agent ??= {}; CFG.agent.user ??= 'agent'; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.lific) CFG.lific.bin = resolve(ROOT, CFG.lific.bin);
 
@@ -34,6 +35,7 @@ const run = (bin, args) => execFileSync(bin, args, { encoding: 'utf8', stdio: ['
 // The tracker: Lific's CLI over HTTP, as the identity of $LIFIC_API_KEY. `--flag=value` so a value may start with a dash.
 const t = (...a) => run(CFG.lific.bin, ['--json', '--backend', 'http', '--url', CFG.lific.url, ...a]);
 const tj = (...a) => JSON.parse(t(...a) || 'null');
+const LIFIC = () => [CFG.lific.bin, ['--json', '--backend', 'http', '--url', CFG.lific.url]];
 const comment = (key, text) => t('comment', 'add', key, `--content=${text}`);
 // A label edit is read-modify-write inside the CLI and loses to any concurrent write on the issue (a comment is enough): once more.
 const relabel = (key, flag, label) => { const go = () => t('issue', 'update', key, `--${flag}-label=${label}`); return try_(go) ?? go(); };
@@ -57,6 +59,12 @@ export const notifyStep = (i) => (i.labels.includes(CFG.humanLabel) === i.notifi
 // both). 'rerun' now | 'wait' for the active run to end | 'on-assign' when the scheduler next starts it.
 export const freshStep = (i, isAssigned, activeRuns) =>
   (!i.labels.includes(CFG.freshLabel) ? null : !isAssigned ? 'on-assign' : activeRuns ? 'wait' : 'rerun');
+// New complete lines of an agent log from byte `pos` -> { pos: where the next read starts, out: what to show of them }.
+// A line still being written (no newline yet) stays for the next read.
+export function tail(buf, pos) {
+  const end = buf.lastIndexOf('\n') + 1;
+  return end <= pos ? { pos, out: [] } : { pos: end, out: buf.subarray(pos, end).toString('utf8').split('\n').flatMap(say).map(plain) };
+}
 // An in_progress issue with no hand-off yet: null = its agent is still running | 'park' it (waits on a blocker or a
 // human) | 'start' the next run | 'stuck' = max runs in a row ended with nothing to show, so a human has to look.
 export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why ? 'park' : n >= max ? 'stuck' : 'start');
@@ -158,13 +166,24 @@ function start(p, i, runs) {
   const prompt = first ? `${brief(readFileSync(resolve(ROOT, p.instructions ?? 'agents/default.md'), 'utf8'), Object.values(CFG.projects))}\n\nYour issue: ${i.identifier}.`
     : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
-  const out = openSync(`${DIR}/logs/${i.identifier}.log`, 'a'), [bin, ...args] = CFG.agent.cmd;
+  const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
+  r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
   const child = spawn(bin, [...args, first ? '--session-id' : '--resume', r.session, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
     env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: `${DIR}/bin:${process.env.PATH}` }) });
   child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
   child.unref(); r.pid = child.pid; r.n++;
   saveRuns(runs); // persist right away: a later throw in this tick must not orphan the process
   log(null, 'run', i.identifier, `#${r.n}`, first ? 'new session' : 'resumed', `pid ${r.pid}`, r.wt);
+}
+// The tracker's run log of an issue = the readable part of its agent log, forwarded once per tick.
+function forward(runs) {
+  for (const [key, r] of Object.entries(runs)) {
+    const f = `${DIR}/logs/${key}.log`;
+    if (!existsSync(f) || statSync(f).size <= (r.pos ?? 0)) continue;
+    const { pos, out } = tail(readFileSync(f), r.pos ?? 0), [bin, args] = LIFIC();
+    if (out.length && try_(() => execFileSync(bin, [...args, 'issue', 'log', 'add', key, `--source=run ${r.n}`], { input: out.join('\n'), stdio: ['pipe', 'pipe', 'pipe'] })) == null) continue;
+    r.pos = pos; saveRuns(runs);
+  }
 }
 function restartFresh(p, i, runs) {
   forget(p, i.identifier, runs);
@@ -298,6 +317,7 @@ function tick() {
     .map((i) => meta(tj('issue', 'get', i.identifier), notified)).sort((a, b) => a.project_id - b.project_id || a.sequence - b.sequence);
   const byKey = Object.fromEntries(issues.map((i) => [i.identifier, i]));
   const statusOf = (k) => (byKey[k] ??= meta(tj('issue', 'get', k))).status;
+  forward(runs);
   for (const [id, p] of Object.entries(projects)) {
     try { refinery(p, byKey, +id); } catch (e) { log(`rq${p.repo}`, 'refinery error', p.repo, e.message.split('\n')[0]); }
   }
@@ -330,7 +350,7 @@ function tick() {
   for (const i of issues.filter((x) => x.status === 'in_progress')) {
     const r = runs[i.identifier], why = whyNot(i, [], statusOf), step = runStep(alive(r), why, r?.n ?? 0);
     if (step === 'park') {
-      t('issue', 'update', i.identifier, '--status=todo'); i.status = 'todo';
+      t('issue', 'update', i.identifier, '--status=todo', '--unassign'); i.status = 'todo';
       if (r) { r.n = 0; saveRuns(runs); }
       log(null, 'park', i.identifier, why);
     } else if (step === 'stuck') {
@@ -349,7 +369,7 @@ function tick() {
     const why = whyNot(i, flight, statusOf);
     if (why) { log(i.identifier, 'wait', i.identifier, why); continue; }
     if (freshStep(i, false, 0) === 'on-assign') restartFresh(p, i, runs);
-    t('issue', 'update', i.identifier, '--status=active'); i.status = 'in_progress';
+    t('issue', 'update', i.identifier, '--status=active', `--assignee=${CFG.agent.user}`); i.status = 'in_progress';
     log(i.identifier, 'assign', i.identifier, p.repo, `footprint=${i.footprint.join(',')}`);
     start(p, i, runs);
     flight.push(i);

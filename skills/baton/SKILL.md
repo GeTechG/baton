@@ -75,7 +75,7 @@ lific issue update <KEY> --add-label needs-human         # park for a human
 Add `--json` for scripts. Against a running server pass `--backend http` with `LIFIC_URL` and `LIFIC_API_KEY` set
 (agents started by baton get a `lific` on their PATH that already does).
 
-To see what the system is doing, in the baton checkout: `node watch.mjs` (live view of the agent runs),
+To see what the system is doing: the issue's run log and assignee in the tracker UI; in the baton checkout `node watch.mjs` (live view of the agent runs),
 `state/bridge.log` (every start / park / batch / merge / landed decision), `state/logs/<KEY>.log` (an issue's raw agent
 output), `scripts/status.sh`.
 

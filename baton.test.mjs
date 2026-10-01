@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief, runStep, agentEnv } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief, runStep, agentEnv, tail } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: props.fp == null ? {} : { footprint: props.fp }, blocked_by: props.bb });
@@ -140,6 +140,16 @@ test('watch: one line per tool call, quiet on clean results, loud on failures', 
   assert.match(lines('K-1', result([{ type: 'text', text: 'Error: boom' }], true), '')[0], /✖ Error: boom/);
   assert.match(lines('K-1', 'not json: a crash trace', '')[0], /not json: a crash trace/); // whatever the agent CLI prints raw
   assert.deepEqual(lines('K-1', JSON.stringify({ type: 'system', subtype: 'init' }), ''), []);
+});
+
+test('run log: complete new lines only, readable form, nothing for noise', () => {
+  const ev = (content) => JSON.stringify({ type: 'assistant', message: { content } });
+  const log = Buffer.from([ev([{ type: 'text', text: 'Читаю задачу' }]), JSON.stringify({ type: 'system', subtype: 'init' }),
+    ev([{ type: 'tool_use', name: 'Bash', input: { description: 'Run tests' } }]), '{"type":"assistant","message":{"content":[{"type":"te'].join('\n'));
+  const first = tail(log, 0);
+  assert.deepEqual(first.out, ['Читаю задачу', 'Bash Run tests']);
+  assert.equal(log.subarray(first.pos).toString(), '{"type":"assistant","message":{"content":[{"type":"te'); // the unfinished line waits
+  assert.deepEqual(tail(log, first.pos), { pos: first.pos, out: [] });
 });
 
 test('fresh label: rerun when idle, wait while a run is active, defer to assignment when parked', () => {

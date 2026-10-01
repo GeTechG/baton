@@ -12,7 +12,8 @@ for it in a git worktree of your own checkout, and decides **what** reaches `mai
   the conversation and reuses the build output. The worktree hangs off the project's local checkout (`path`) at
   `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. An `active` issue is the agent's to move: baton starts it again whenever its process has ended, parks it back to
   `todo` while it waits on a blocker or a human, and after `maxRuns` (default 3) runs in a row with nothing to show
-  adds `needs-human` instead of burning tokens.
+  adds `needs-human` instead of burning tokens. While it runs the issue is assigned to the agents' tracker user
+  (`agent.user`, default `agent`) and its run log in the tracker shows, a tick behind, what the agent is doing.
 - **Merge queue (Bors-style):** agents only open PRs and set `in_review`. Green PRs are merged `--no-ff` into
   `batch/<ts>` on top of base; base fast-forwards only to a batch whose exact tree passed CI. Red batch → bisect;
   a single red PR goes back to its agent. `main` is never red.
@@ -23,8 +24,8 @@ for it in a git worktree of your own checkout, and decides **what** reaches `mai
 - **Human gates:** `gate:spec` issues post a plan and park on `needs-human`; swap it for `spec:approved` to proceed.
 
 ## Run
-1. Lific: put the binary at `bin/lific` (it must have the `in_review` status, issue properties, `issue update
-   --add-label/--remove-label` and `issue link` — not in an upstream release yet), `bin/lific init` (config, database, your admin account, a user service on
+1. Lific: put the binary at `bin/lific` (it must be built from the `baton-features` branch of the fork: `in_review` status, issue properties,
+   assignee, run log, `issue update --add-label/--remove-label`, `issue link` — none of it is upstream), `bin/lific init` (config, database, your admin account, a user service on
    `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human`, `gate:spec`,
    `spec:approved`, `fresh`, `after-landing` in each, and two bot users with an API key each
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
