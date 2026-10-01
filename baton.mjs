@@ -2,8 +2,8 @@
 // Scheduler, agent runner and batch merge queue between Lific (the tracker) and GitHub; everything project-specific
 // is in config.json ($BATON_CONFIG). Humans file issues as `todo`; baton alone moves one to `active`, gives it a git
 // worktree off the project's local checkout and runs the agent there (one worktree and one agent session per issue,
-// kept until the issue closes). Native "blocked by" links and a `footprint:` line in the description gate readiness;
-// cfg.humanLabel parks; cfg.reviewLabel on an active issue = the agent handed off a PR on <branchPrefix><KEY>.
+// kept until the issue closes). Native "blocked by" links and the text property `footprint` gate readiness;
+// cfg.humanLabel parks; status in_review = the agent handed off a PR on <branchPrefix><KEY>.
 // Queue (Bors-style): green PRs merge --no-ff into batch/<ts> on base; base fast-forwards only to a batch whose exact tree
 // passed CI; red -> bisect. Batch cached in batch-<repo>.json, recoverable from the remote branch's merge subjects.
 // ponytail: prefix-match footprints, 100 open issues per project and status, one `issue get` per open issue per tick,
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.reviewLabel ??= 'in-review'; CFG.maxInFlight ??= 4; CFG.maxRuns ??= 3; CFG.tickSec ??= 5;
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.maxInFlight ??= 4; CFG.maxRuns ??= 3; CFG.tickSec ??= 5;
 CFG.agent ??= {}; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.lific) CFG.lific.bin = resolve(ROOT, CFG.lific.bin);
@@ -41,18 +41,16 @@ const gh = (...a) => run('gh', a), ghj = (...a) => JSON.parse(gh(...a) || 'null'
 const try_ = (f) => { try { return f(); } catch { return null; } };
 
 // ---- pure logic (tested in baton.test.mjs) ----
-// list() takes a footprint line or raw Haiku output: comma/newline separated, quotes/backticks/bullets/trailing
+// list() takes a property value or raw Haiku output: comma/newline separated, quotes/backticks/bullets/trailing
 // punctuation stripped, prose (anything with a space) dropped.
 export const list = (s) => (s ?? '').split(/[,\n]/).map((x) => x.replace(/[`'"*]/g, '').trim().replace(/^- /, '').replace(/[.;:]+$/, ''))
   .filter((x) => x && !/\s/.test(x));
 export const overlaps = (a, b) => !a?.length || !b?.length || a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
-// The `footprint: a, b` line of a description -> paths; null = no such line yet (baton estimates one and appends it).
-export const fpOf = (desc) => { const l = /^footprint:[ \t]*(.*)$/im.exec(desc ?? ''); return l ? list(l[1]) : null; };
-// A tracker issue in the scheduler's terms: Lific has no review status, so `active` + cfg.reviewLabel = in_review and
-// plain `active` = in_progress (baton owns that transition, so it also means "in flight"). notified = already pinged.
-export const meta = (i, notified = []) => ({ ...i, labels: i.labels ?? [], footprint: fpOf(i.description), blockedBy: i.blocked_by ?? [],
-  status: i.status !== 'active' ? i.status : (i.labels ?? []).includes(CFG.reviewLabel) ? 'in_review' : 'in_progress',
-  notified: notified.includes(i.identifier) });
+// A tracker issue in the scheduler's terms: text property `footprint` (null = not set yet: baton estimates it), native
+// blockers, and Lific's `active` under the name the rest of this file uses. notified = the human was already pinged.
+export const meta = (i, notified = []) => ({ ...i, labels: i.labels ?? [], blockedBy: i.blocked_by ?? [],
+  footprint: i.properties?.footprint == null ? null : list(i.properties.footprint),
+  status: i.status === 'active' ? 'in_progress' : i.status, notified: notified.includes(i.identifier) });
 // Human-label edge -> 'notify' (label appeared, not yet announced) | 'clear' (label gone, re-arm) | null.
 export const notifyStep = (i) => (i.labels.includes(CFG.humanLabel) === i.notified ? null : i.notified ? 'clear' : 'notify');
 // cfg.freshLabel on an issue = "its next run starts with a new session and a new worktree" (a plain rerun resumes
@@ -175,13 +173,13 @@ function restartFresh(p, i, runs) {
   log(null, 'fresh', i.identifier, 'next run starts with a new session and worktree');
 }
 
-function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted as a line of the issue's description
+function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
   const files = repoMap(gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path').split('\n'));
   const prompt = `Repo paths:\n${files}\n\nTask:\n${i.title}\n${i.description ?? ''}\n\n${p.footprintHint ?? ''}\n` +
     'Reply with ONLY a comma-separated list of repo paths this task will create or edit.';
   const out = execFileSync('claude', ['-p', '--model', 'haiku', '--max-turns', '1'], { input: prompt, encoding: 'utf8' }).trim(); // stdin: argv has a size limit
   const fp = list(out);
-  t('issue', 'update', i.identifier, `--description=${`${i.description ?? ''}\n\nfootprint: ${fp.join(', ')}`.trim()}`);
+  t('issue', 'update', i.identifier, `--set=footprint=${fp.join(', ')}`);
   log(null, 'footprint', i.identifier, fp.join(', '));
   return fp;
 }
@@ -189,8 +187,8 @@ function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted as a li
 function sendBack(p, pr, i, why) {
   try_(() => gh('pr', 'comment', String(pr.number), '-R', p.repo, '--body', `bridge: ${why} — sent back to the agent`));
   comment(pr.key, `Bridge: PR #${pr.number} ${why}. Fix it on that PR's branch ` +
-    `(git fetch && git rebase origin/${p.base}, resolve, re-test, force-push), then add the ${CFG.reviewLabel} label again.`);
-  relabel(pr.key, 'remove', CFG.reviewLabel); // comment first: the label going away is what starts the agent's next run
+    `(git fetch && git rebase origin/${p.base}, resolve, re-test, force-push), then set in_review again.`);
+  t('issue', 'update', pr.key, '--status=active'); // comment first: the status change is what starts the agent's next run
   if (i) i.status = 'in_progress';
   log(null, 'send-back', p.repo, `#${pr.number}`, pr.key, why);
 }
@@ -259,8 +257,7 @@ function land(p, git, batch, base, byKey) {
     const after = byKey[pr.key]?.labels.includes(CFG.afterLandLabel);
     if (after) comment(pr.key, `Bridge: PR #${pr.number} landed on ${p.base} in ${batch.sha}. ` +
       `Do your post-landing steps now, comment the result, then set this issue done.`);
-    else t('issue', 'update', pr.key, '--status=done');
-    relabel(pr.key, 'remove', CFG.reviewLabel);
+    t('issue', 'update', pr.key, `--status=${after ? 'active' : 'done'}`);
     try_(() => git('push', '-q', 'origin', '--delete', ref));
     log(null, 'merged', p.repo, `#${pr.number}`, pr.key, `(${state})`, after ? '-> after-landing' : '-> done');
   }
@@ -296,8 +293,8 @@ function tick() {
   const runs = loadRuns(), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
   const projects = Object.fromEntries(tj('project', 'list').filter((p) => CFG.projects[p.name])
     .map((p) => [p.id, Object.assign(CFG.projects[p.name], { key: p.identifier })]));
-  // todo + active is everything the scheduler acts on (backlog = not ready yet: the human moves it to todo).
-  const issues = Object.values(projects).flatMap((p) => ['todo', 'active'].flatMap((s) => tj('issue', 'list', '-p', p.key, '--status', s, '--limit', '100')))
+  // Every open status but backlog (= not ready yet: the human moves it to todo).
+  const issues = Object.values(projects).flatMap((p) => ['todo', 'active', 'in_review'].flatMap((s) => tj('issue', 'list', '-p', p.key, '--status', s, '--limit', '100')))
     .map((i) => meta(tj('issue', 'get', i.identifier), notified)).sort((a, b) => a.project_id - b.project_id || a.sequence - b.sequence);
   const byKey = Object.fromEntries(issues.map((i) => [i.identifier, i]));
   const statusOf = (k) => (byKey[k] ??= meta(tj('issue', 'get', k))).status;
@@ -327,7 +324,7 @@ function tick() {
     if (step === 'rerun') restartFresh(projects[i.project_id], i, runs); else log(`f${i.identifier}`, 'fresh', i.identifier, 'waits for the active run to end');
   }
 
-  // In progress = the agent owes a hand-off: keep it running until it adds the review label, parks on a blocker or a
+  // In progress = the agent owes a hand-off: keep it running until it sets in_review, parks on a blocker or a
   // human, or closes the issue. A handed-off or parked issue starts the count of fruitless runs afresh.
   for (const i of issues.filter((x) => x.status === 'in_review' && runs[x.identifier]?.n)) { runs[i.identifier].n = 0; saveRuns(runs); }
   for (const i of issues.filter((x) => x.status === 'in_progress')) {

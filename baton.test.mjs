@@ -1,10 +1,10 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief, fpOf, runStep, agentEnv } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief, runStep, agentEnv } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
-  description: props.fp == null ? 'Do the thing.' : `Do the thing.\n\nfootprint: ${props.fp}`, blocked_by: props.bb });
+  properties: props.fp == null ? {} : { footprint: props.fp }, blocked_by: props.bb });
 
 test('footprint parsing: backticks, trailing punctuation, bullets, prose', () => {
   assert.deepEqual(list('`src/a.js`, `test/greet.test.js`'), ['src/a.js', 'test/greet.test.js']); // round-1 Haiku bug
@@ -13,15 +13,13 @@ test('footprint parsing: backticks, trailing punctuation, bullets, prose', () =>
   assert.deepEqual(list(undefined), []);
 });
 
-test('tracker issue -> scheduler terms: footprint line, native blockers, review label', () => {
+test('tracker issue -> scheduler terms: footprint property, native blockers, active = in_progress', () => {
   assert.deepEqual(issue('OS-2', { bb: ['OS-12', 'LIB-3'] }).blockedBy, ['OS-12', 'LIB-3']);
   assert.deepEqual(issue('OS-2').blockedBy, []);
-  assert.equal(issue('OS-2').footprint, null); // no footprint line => baton estimates it
-  assert.deepEqual(fpOf('Text.\nFootprint: `src/a.js`, test/a.test.js.\nMore text.'), ['src/a.js', 'test/a.test.js']);
-  assert.deepEqual(fpOf('footprint:'), []); // declared empty: overlaps everything
+  assert.equal(issue('OS-2').footprint, null); // no footprint property => baton estimates it
+  assert.deepEqual(issue('OS-2', { fp: '`src/a.js`, test/a.test.js.' }).footprint, ['src/a.js', 'test/a.test.js']);
   assert.equal(meta({ identifier: 'K-1', status: 'active', labels: [] }).status, 'in_progress');
-  assert.equal(meta({ identifier: 'K-1', status: 'active', labels: ['in-review'] }).status, 'in_review');
-  assert.equal(meta({ identifier: 'K-1', status: 'todo', labels: ['in-review'] }).status, 'todo');
+  assert.equal(meta({ identifier: 'K-1', status: 'in_review' }).status, 'in_review');
   assert.equal(meta({ identifier: 'K-1', status: 'todo' }, ['K-1']).notified, true);
 });
 

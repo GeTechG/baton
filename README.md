@@ -6,27 +6,27 @@ for it in a git worktree of your own checkout, and decides **what** reaches `mai
 
 - **Scheduling (stateless):** humans file issues as `todo`; baton moves one to `active` and starts its agent only when
   every issue that blocks it (Lific's native "blocked by" links, across projects too) is done, it has no `needs-human`
-  label, and its footprint (the `footprint: a, b` line of its description — Haiku-estimated and appended if missing)
+  label, and its `footprint` property (Haiku-estimated if missing)
   doesn't overlap an in-flight issue. `backlog` issues are never picked up: move them to `todo`.
 - **Runs:** one git worktree and one agent session per issue, both kept until the issue closes, so a later run resumes
   the conversation and reuses the build output. The worktree hangs off the project's local checkout (`path`) at
-  `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. An `active` issue without the
-  `in-review` label is the agent's to move: baton starts it again whenever its process has ended, parks it back to
+  `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. An `active` issue is the agent's to move: baton starts it again whenever its process has ended, parks it back to
   `todo` while it waits on a blocker or a human, and after `maxRuns` (default 3) runs in a row with nothing to show
   adds `needs-human` instead of burning tokens.
-- **Merge queue (Bors-style):** agents only open PRs and add the `in-review` label. Green PRs are merged `--no-ff` into
+- **Merge queue (Bors-style):** agents only open PRs and set `in_review`. Green PRs are merged `--no-ff` into
   `batch/<ts>` on top of base; base fast-forwards only to a batch whose exact tree passed CI. Red batch → bisect;
   a single red PR goes back to its agent. `main` is never red.
-- **Post-landing steps:** label `after-landing` on an issue = after its PR lands baton hands it back to the agent (drops `in-review` + a comment) instead of closing it; the agent sets `done`.
+- **Post-landing steps:** label `after-landing` on an issue = after its PR lands baton hands it back to the agent (`active` + a comment) instead of closing it; the agent sets `done`.
 - **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both and removes the label; unpushed work in the old worktree is lost).
 - **Release gate:** `"release": "build-{sha}"` on a project = after its batch lands, the issues stay in review (and the
   queue of that repo waits) until that GitHub release exists for the landed commit (after `releaseTimeoutMin`, default 60, baton comments on the issues and pings ntfy once, then keeps waiting) — for repos whose consumers pin a commit and need its build.
 - **Human gates:** `gate:spec` issues post a plan and park on `needs-human`; swap it for `spec:approved` to proceed.
 
 ## Run
-1. Lific: put the binary at `bin/lific`, `bin/lific init` (config, database, your admin account, a user service on
+1. Lific: put the binary at `bin/lific` (it must have the `in_review` status, issue properties, `issue update
+   --add-label/--remove-label` and `issue link` — not in an upstream release yet), `bin/lific init` (config, database, your admin account, a user service on
    `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human`, `gate:spec`,
-   `spec:approved`, `in-review`, `fresh`, `after-landing` in each, and two bot users with an API key each
+   `spec:approved`, `fresh`, `after-landing` in each, and two bot users with an API key each
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
 2. `.env` (gitignored): `LIFIC_API_KEY=` baton's key, `AGENT_LIFIC_API_KEY=` the agents' key, `AGENT_GH_TOKEN=` the
    GitHub token agents push with. Every `AGENT_X` reaches the agent processes as `X`; baton itself uses the machine's `gh` login.

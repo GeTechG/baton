@@ -1,6 +1,6 @@
 ---
 name: baton
-description: Context for repos whose work is orchestrated by baton (a scheduler, agent runner and batch merge queue) on top of Lific (a local issue tracker). Use when the project mentions baton or Lific, when you see `mc/<KEY>` or `batch/<ts>` branches or issue keys like `ABC-7`, and before filing or picking up a task, opening or merging a PR, pushing to the base branch, or changing an issue's status, labels, footprint or blockers.
+description: Context for repos whose work is orchestrated by baton (a scheduler, agent runner and batch merge queue) on top of Lific (a local issue tracker). Use when the project mentions baton or Lific, when you see `mc/<KEY>` or `batch/<ts>` branches or issue keys like `ABC-7`, and before filing or picking up a task, opening or merging a PR, pushing to the base branch, or changing an issue's status, labels, `footprint` or blockers.
 ---
 
 # baton + Lific
@@ -23,7 +23,7 @@ fighting the scheduler.
 |---|---|
 | File an issue (`todo`, or `backlog` if it is not ready) | human, or an agent that needs work done elsewhere |
 | Move it to `active`, start the agent | **baton only** |
-| Implement on `mc/<KEY>`, open the PR, add the `in-review` label | the agent |
+| Implement on `mc/<KEY>`, open the PR, set `in_review` | the agent |
 | Watch CI, batch, merge, fast-forward the base branch | **baton only** |
 | Set `done` | **baton** (the agent only for `after-landing` issues) |
 
@@ -35,7 +35,7 @@ fighting the scheduler.
 - **Never set `done`** unless the issue carries `after-landing` and you are finishing its post-landing steps.
 - Don't touch `batch/*` branches, someone else's `mc/*` branch, or an issue worktree (`<checkout>.wt/<KEY>`) that is
   not yours. One issue = one branch `mc/<KEY>` = one PR whose title starts with the key.
-- Don't wait for CI after handing off: add `in-review` and stop. A red PR comes back with a comment and the label removed.
+- Don't wait for CI after handing off: set `in_review` and stop. A red PR comes back as `active` with a comment.
 - Stay inside the issue's footprint. It is how baton keeps parallel agents off each other's files.
 
 ## How an issue becomes ready
@@ -47,17 +47,16 @@ baton starts a `todo` issue when all of these hold:
 - its footprint does not overlap an in-flight issue of the same project (path-prefix match),
 - the in-flight cap is not reached.
 
-## Issue fields and labels
+## Issue properties and labels
 
 | Name | Kind | Meaning |
 |---|---|---|
-| `footprint: a, b` | a line of the description | Comma-separated paths the task will touch. Estimated by an LLM and appended if missing; write it yourself when you know better. |
+| `footprint` | property | Comma-separated paths the task will touch. Estimated by an LLM if missing; set it yourself when you know better. |
 | blocked by | link | `lific issue link <BLOCKER> <BLOCKED>`: the blocked issue waits until the blocker is done. |
-| `in-review` | label | The agent handed off a PR; the merge queue owns the issue now. |
 | `needs-human` | label | Parked for a human; baton will not run it and pings the human once. |
 | `gate:spec` | label | The agent posts a `## Plan` comment and parks on `needs-human` instead of coding. |
 | `spec:approved` | label | Replaces `needs-human` on a gated issue: the plan is approved, implement it. |
-| `after-landing` | label | After the PR lands baton returns the issue to the agent (drops `in-review` + a comment) for post-landing steps. |
+| `after-landing` | label | After the PR lands baton returns the issue to the agent (`active` + a comment) for post-landing steps. |
 | `fresh` | label | Next run starts with a new session and a new worktree; baton removes the label. |
 
 Label names and the in-flight cap are configurable in baton's `config.json`; the names above are the defaults.
@@ -67,9 +66,9 @@ Label names and the in-flight cap are configurable in baton's `config.json`; the
 ```sh
 lific project list
 lific issue get <KEY>; lific comment list <KEY>
-lific issue create --project <PREFIX> --status todo --title=… --description=$'…\n\nfootprint: src/foo/, test/foo.test.js'
+lific issue create --project <PREFIX> --status todo --title=… --description=… --set footprint="src/foo/, test/foo.test.js"
 lific issue link <BLOCKER-KEY> <KEY>                     # KEY waits for BLOCKER-KEY
-lific issue update <KEY> --add-label in-review           # hand off an open PR
+lific issue update <KEY> --status in_review              # hand off an open PR
 lific issue update <KEY> --add-label needs-human         # park for a human
 ```
 

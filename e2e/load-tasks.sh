@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Load T1–T5 as a human would: todo, no footprint, no dependency; T5 gets gate:spec. Needs LIFIC_URL and LIFIC_API_KEY,
-# projects `app` (prefix APP) and `lib` (LIB), and labels needs-human, gate:spec, spec:approved, in-review, fresh in APP.
+# projects `app` (prefix APP) and `lib` (LIB), and labels needs-human, gate:spec, spec:approved, fresh in APP.
 set -euo pipefail
 L="$(dirname "$0")/../bin/lific --backend http --json"
 c() { $L issue create --project APP --status todo "--title=$1" "--description=$2" | jq -r .identifier; }
