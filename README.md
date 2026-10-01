@@ -24,6 +24,10 @@ One entry in `config.json` `projects` + an agent-instructions markdown (the work
 Nothing project-specific lives in this repo: `config.json`, `.env` and your instruction files in `local/` are gitignored;
 `agents/default.md` is only a generic starting point.
 
+## Agent skill
+`skills/baton/SKILL.md` tells any coding agent (Claude Code, Codex, opencode, …) that a repo is run by baton + Multica
+and what not to do by hand. Install: `npx skills add GeTechG/baton` (add `-g` for all your projects).
+
 ## Tests
 - `node watch.mjs` — live view of what every in-flight agent is doing (run it in a spare terminal pane).
 - `npm test` — pure logic (footprints, readiness, batch decisions).
