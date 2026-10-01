@@ -1,23 +1,27 @@
 #!/usr/bin/env node
-// Scheduler + batch merge queue between Multica and GitHub; everything project-specific is in config.json ($BATON_CONFIG).
-// Scheduling is stateless: humans file issues UNASSIGNED, only the bridge assigns the agent; text properties `blocked-by`
-// and `footprint` gate readiness; cfg.humanLabel parks; status in_review = agent handed off a PR on <branchPrefix><KEY>.
+// Scheduler, agent runner and batch merge queue between Lific (the tracker) and GitHub; everything project-specific
+// is in config.json ($BATON_CONFIG). Humans file issues as `todo`; baton alone moves one to `active`, gives it a git
+// worktree off the project's local checkout and runs the agent there (one worktree and one agent session per issue,
+// kept until the issue closes). Native "blocked by" links and a `footprint:` line in the description gate readiness;
+// cfg.humanLabel parks; cfg.reviewLabel on an active issue = the agent handed off a PR on <branchPrefix><KEY>.
 // Queue (Bors-style): green PRs merge --no-ff into batch/<ts> on base; base fast-forwards only to a batch whose exact tree
 // passed CI; red -> bisect. Batch cached in batch-<repo>.json, recoverable from the remote branch's merge subjects.
-// ponytail: prefix-match footprints, a 100-issue page, serial bisect; add globbing/paging/parallel bisect if they hurt.
-import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdirSync } from 'node:fs';
+// ponytail: prefix-match footprints, 100 open issues per project and status, one `issue get` per open issue per tick,
+// serial bisect, a run is "alive" while its pid exists (a reboot can recycle it); refine when they hurt.
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Relative paths in the config (multica.bin, stateDir, instructions) resolve against the baton checkout.
+// Relative paths in the config (lific.bin, stateDir, instructions, path, worktrees) resolve against the baton checkout.
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.maxInFlight ??= 4; CFG.tickSec ??= 5;
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.reviewLabel ??= 'in-review'; CFG.maxInFlight ??= 4; CFG.maxRuns ??= 3; CFG.tickSec ??= 5;
+CFG.agent ??= {}; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
-if (CFG.multica) CFG.multica.bin = resolve(ROOT, CFG.multica.bin);
+if (CFG.lific) CFG.lific.bin = resolve(ROOT, CFG.lific.bin);
 
 const seen = new Map(); // log de-dup only: repeat decisions are logged once
 const log = (key, ...a) => {
@@ -27,26 +31,42 @@ const log = (key, ...a) => {
   console.log(line); appendFileSync(`${DIR}/bridge.log`, line + '\n');
 };
 const run = (bin, args) => execFileSync(bin, args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-const m = (...a) => run(CFG.multica.bin, ['--profile', CFG.multica.profile, '--server-url', CFG.multica.server, ...a]);
-const mj = (...a) => JSON.parse(m(...a, '--output', 'json') || 'null');
+// The tracker: Lific's CLI over HTTP, as the identity of $LIFIC_API_KEY. `--flag=value` so a value may start with a dash.
+const t = (...a) => run(CFG.lific.bin, ['--json', '--backend', 'http', '--url', CFG.lific.url, ...a]);
+const tj = (...a) => JSON.parse(t(...a) || 'null');
+const comment = (key, text) => t('comment', 'add', key, `--content=${text}`);
+// A label edit is read-modify-write inside the CLI and loses to any concurrent write on the issue (a comment is enough): once more.
+const relabel = (key, flag, label) => { const go = () => t('issue', 'update', key, `--${flag}-label=${label}`); return try_(go) ?? go(); };
 const gh = (...a) => run('gh', a), ghj = (...a) => JSON.parse(gh(...a) || 'null');
 const try_ = (f) => { try { return f(); } catch { return null; } };
 
-// ---- pure logic (tested in bridge.test.mjs) ----
-// list() takes a property value or raw Haiku output: comma/newline separated, quotes/backticks/bullets/trailing
+// ---- pure logic (tested in baton.test.mjs) ----
+// list() takes a footprint line or raw Haiku output: comma/newline separated, quotes/backticks/bullets/trailing
 // punctuation stripped, prose (anything with a space) dropped.
 export const list = (s) => (s ?? '').split(/[,\n]/).map((x) => x.replace(/[`'"*]/g, '').trim().replace(/^- /, '').replace(/[.;:]+$/, ''))
   .filter((x) => x && !/\s/.test(x));
 export const overlaps = (a, b) => !a?.length || !b?.length || a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
-export const meta = (i, P) => ({ ...i, labels: (i.labels ?? []).map((l) => l.name),
-  footprint: i.properties?.[P.footprint] == null ? null : list(i.properties[P.footprint]), blockedBy: list(i.properties?.[P['blocked-by']]), notified: !!i.properties?.[P.notified] });
+// The `footprint: a, b` line of a description -> paths; null = no such line yet (baton estimates one and appends it).
+export const fpOf = (desc) => { const l = /^footprint:[ \t]*(.*)$/im.exec(desc ?? ''); return l ? list(l[1]) : null; };
+// A tracker issue in the scheduler's terms: Lific has no review status, so `active` + cfg.reviewLabel = in_review and
+// plain `active` = in_progress (baton owns that transition, so it also means "in flight"). notified = already pinged.
+export const meta = (i, notified = []) => ({ ...i, labels: i.labels ?? [], footprint: fpOf(i.description), blockedBy: i.blocked_by ?? [],
+  status: i.status !== 'active' ? i.status : (i.labels ?? []).includes(CFG.reviewLabel) ? 'in_review' : 'in_progress',
+  notified: notified.includes(i.identifier) });
 // Human-label edge -> 'notify' (label appeared, not yet announced) | 'clear' (label gone, re-arm) | null.
 export const notifyStep = (i) => (i.labels.includes(CFG.humanLabel) === i.notified ? null : i.notified ? 'clear' : 'notify');
-// cfg.freshLabel on an issue = "its next run starts with a clean session and working directory" (the UI's Retry
-// always resumes). 'rerun' now | 'wait' for the active run to end | 'on-assign' when the scheduler next assigns it.
+// cfg.freshLabel on an issue = "its next run starts with a new session and a new worktree" (a plain rerun resumes
+// both). 'rerun' now | 'wait' for the active run to end | 'on-assign' when the scheduler next starts it.
 export const freshStep = (i, isAssigned, activeRuns) =>
   (!i.labels.includes(CFG.freshLabel) ? null : !isAssigned ? 'on-assign' : activeRuns ? 'wait' : 'rerun');
-// null = ready to assign now; otherwise why not. statusOf(key) -> issue status.
+// An in_progress issue with no hand-off yet: null = its agent is still running | 'park' it (waits on a blocker or a
+// human) | 'start' the next run | 'stuck' = max runs in a row ended with nothing to show, so a human has to look.
+export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why ? 'park' : n >= max ? 'stuck' : 'start');
+// What an agent process gets: baton's environment, with every AGENT_X variable renamed to X (its own tracker key and
+// GitHub token live in .env under that prefix, so baton itself never runs with them), plus `extra`.
+export const agentEnv = (env, extra = {}) => ({ ...Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('AGENT_'))),
+  ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('AGENT_')).map(([k, v]) => [k.slice(6), v])), ...extra });
+// null = ready to start now; otherwise why not. statusOf(key) -> issue status.
 export function whyNot(i, flight, statusOf, max = CFG.maxInFlight) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
   if (open.length) return `blocked by ${open}`;
@@ -93,7 +113,8 @@ export const releaseTag = (p, sha) => p.release?.replace('{sha}', sha) ?? null;
 // A landed batch whose release has not shown up in time (once per batch; batch.landed = ms it landed).
 export const releaseLate = (batch, now, min = 60) => !batch.late && now - batch.landed > min * 60e3;
 // Agent instructions with {{projects}} replaced by what a shared, project-independent worker cannot guess per repo.
-export const brief = (text, ps) => text.replace('{{projects}}', ps.map((p) => `- ${p.repo}: base branch \`${p.base}\`, ` +
+// p.key = the project's tracker prefix (issue keys are <key>-<n>).
+export const brief = (text, ps) => text.replace('{{projects}}', ps.map((p) => `- ${p.key ? `${p.key} = ` : ''}${p.repo}: base branch \`${p.base}\`, ` +
   `PR branch \`${p.branchPrefix}<KEY>\`, check: ${p.check ? `\`${p.check}\`` : 'none configured'}`).join('\n'));
 
 // The path list for the footprint prompt: every file while the repo is small, otherwise its directories cut to the
@@ -108,32 +129,68 @@ export function repoMap(paths, budget = 40000) {
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
 }
 
-function restartFresh(i) { // fresh session + workdir; the agent rebuilds state from the branch, PR and issue
-  m('issue', 'rerun', i.identifier);
-  const id = mj('label', 'list').find((l) => l.name === CFG.freshLabel)?.id;
-  if (id) m('issue', 'label', 'remove', i.identifier, id);
+// ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, session, wt, n } } ----
+const RUNS = `${DIR}/runs.json`;
+const loadRuns = () => try_(() => JSON.parse(readFileSync(RUNS, 'utf8'))) ?? {};
+const saveRuns = (runs) => writeFileSync(RUNS, JSON.stringify(runs));
+const alive = (r) => !!r?.pid && try_(() => process.kill(r.pid, 0)) === true;
+
+// The local checkout the issue worktrees hang off: the configured one (p.path), else baton's own clone.
+function source(p) {
+  if (p.path) return resolve(ROOT, p.path);
+  const dir = `${DIR}/src/${p.repo.replace('/', '__')}`;
+  if (!existsSync(dir)) run('git', ['clone', '-q', `https://github.com/${p.repo}.git`, dir]);
+  return dir;
+}
+function worktree(p, key) { // detached at origin/<base>; the agent creates or checks out its own branch
+  const src = source(p), wt = resolve(p.worktrees ? resolve(ROOT, p.worktrees) : `${src}.wt`, key), git = (...a) => run('git', ['-C', src, ...a]);
+  if (existsSync(wt)) return wt;
+  git('fetch', '-q', 'origin'); git('worktree', 'prune');
+  git('worktree', 'add', '-q', '--detach', wt, `origin/${p.base}`);
+  return wt;
+}
+function forget(p, key, runs) { // the issue's worktree and session are gone; pushed work stays on its branch
+  const wt = runs[key]?.wt;
+  if (wt) { try_(() => run('git', ['-C', source(p), 'worktree', 'remove', '--force', wt])); rmSync(wt, { recursive: true, force: true }); }
+  delete runs[key]; saveRuns(runs);
+}
+function start(p, i, runs) {
+  const r = runs[i.identifier] ??= { session: randomUUID(), n: 0 }, first = !r.wt;
+  r.wt ??= worktree(p, i.identifier);
+  const prompt = first ? `${brief(readFileSync(resolve(ROOT, p.instructions ?? 'agents/default.md'), 'utf8'), Object.values(CFG.projects))}\n\nYour issue: ${i.identifier}.`
+    : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
+  mkdirSync(`${DIR}/logs`, { recursive: true });
+  const out = openSync(`${DIR}/logs/${i.identifier}.log`, 'a'), [bin, ...args] = CFG.agent.cmd;
+  const child = spawn(bin, [...args, first ? '--session-id' : '--resume', r.session, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
+    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: `${DIR}/bin:${process.env.PATH}` }) });
+  child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
+  child.unref(); r.pid = child.pid; r.n++;
+  saveRuns(runs); // persist right away: a later throw in this tick must not orphan the process
+  log(null, 'run', i.identifier, `#${r.n}`, first ? 'new session' : 'resumed', `pid ${r.pid}`, r.wt);
+}
+function restartFresh(p, i, runs) {
+  forget(p, i.identifier, runs);
+  relabel(i.identifier, 'remove', CFG.freshLabel);
   i.labels = i.labels.filter((l) => l !== CFG.freshLabel);
-  log(null, 'fresh', i.identifier, 'rerun with a clean session');
+  log(null, 'fresh', i.identifier, 'next run starts with a new session and worktree');
 }
 
-const assigned = (i, p) => i.assignee_type === 'agent' && i.assignee_id === p?.agent;
-
-function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
+function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted as a line of the issue's description
   const files = repoMap(gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path').split('\n'));
   const prompt = `Repo paths:\n${files}\n\nTask:\n${i.title}\n${i.description ?? ''}\n\n${p.footprintHint ?? ''}\n` +
     'Reply with ONLY a comma-separated list of repo paths this task will create or edit.';
   const out = execFileSync('claude', ['-p', '--model', 'haiku', '--max-turns', '1'], { input: prompt, encoding: 'utf8' }).trim(); // stdin: argv has a size limit
   const fp = list(out);
-  m('issue', 'property', 'set', i.identifier, '--name', 'footprint', '--value', fp.join(', '));
+  t('issue', 'update', i.identifier, `--description=${`${i.description ?? ''}\n\nfootprint: ${fp.join(', ')}`.trim()}`);
   log(null, 'footprint', i.identifier, fp.join(', '));
   return fp;
 }
 
 function sendBack(p, pr, i, why) {
   try_(() => gh('pr', 'comment', String(pr.number), '-R', p.repo, '--body', `bridge: ${why} — sent back to the agent`));
-  m('issue', 'status', pr.key, 'in_progress', '--no-start');
-  m('issue', 'comment', 'add', pr.key, '--content', `Bridge: PR #${pr.number} ${why}. Fix it on that PR's branch ` +
-    `(git fetch && git rebase origin/${p.base}, resolve, re-test, force-push), then set in_review again.`);
+  comment(pr.key, `Bridge: PR #${pr.number} ${why}. Fix it on that PR's branch ` +
+    `(git fetch && git rebase origin/${p.base}, resolve, re-test, force-push), then add the ${CFG.reviewLabel} label again.`);
+  relabel(pr.key, 'remove', CFG.reviewLabel); // comment first: the label going away is what starts the agent's next run
   if (i) i.status = 'in_progress';
   log(null, 'send-back', p.repo, `#${pr.number}`, pr.key, why);
 }
@@ -185,7 +242,7 @@ function land(p, git, batch, base, byKey) {
   if (tag && try_(() => gh('release', 'view', tag, '-R', p.repo, '--json', 'isDraft', '-q', '.isDraft')) !== 'false') {
     if (releaseLate(batch, Date.now(), p.releaseTimeoutMin)) { // the build probably failed: tell the human once, keep waiting
       const why = `release ${tag} of ${p.repo} is still missing ${p.releaseTimeoutMin ?? 60} min after landing on ${p.base}`;
-      for (const pr of batch.prs) m('issue', 'comment', 'add', pr.key, '--content', `Bridge: ${why}. Re-run its build; this issue closes once the release exists.`);
+      for (const pr of batch.prs) comment(pr.key, `Bridge: ${why}. Re-run its build; this issue closes once the release exists.`);
       if (CFG.notify?.ntfy) try_(() => run('curl', ['-fsS', '-m', '10', '-H', `Title: ${p.repo} release missing`, '-d', why, CFG.notify.ntfy]));
       writeFileSync(stateFile(p), JSON.stringify({ ...batch, late: true }));
       log(null, 'release late', p.repo, tag);
@@ -200,9 +257,10 @@ function land(p, git, batch, base, byKey) {
     if (state === 'OPEN') gh('pr', 'close', String(pr.number), '-R', p.repo, '--comment', `bridge: landed on ${p.base} in ${batch.sha}`);
     // cfg.afterLandLabel on an issue = its agent has post-landing steps: hand it back instead of closing; the agent sets done.
     const after = byKey[pr.key]?.labels.includes(CFG.afterLandLabel);
-    m('issue', 'status', pr.key, after ? 'in_progress' : 'done', '--no-start');
-    if (after) m('issue', 'comment', 'add', pr.key, '--content', `Bridge: PR #${pr.number} landed on ${p.base} in ${batch.sha}. ` +
+    if (after) comment(pr.key, `Bridge: PR #${pr.number} landed on ${p.base} in ${batch.sha}. ` +
       `Do your post-landing steps now, comment the result, then set this issue done.`);
+    else t('issue', 'update', pr.key, '--status=done');
+    relabel(pr.key, 'remove', CFG.reviewLabel);
     try_(() => git('push', '-q', 'origin', '--delete', ref));
     log(null, 'merged', p.repo, `#${pr.number}`, pr.key, `(${state})`, after ? '-> after-landing' : '-> done');
   }
@@ -235,67 +293,80 @@ function refinery(p, byKey, projectId) {
 }
 
 function tick() {
-  const projects = Object.fromEntries(mj('project', 'list').filter((p) => CFG.projects[p.title]).map((p) => [p.id, CFG.projects[p.title]]));
-  const P = Object.fromEntries(mj('property', 'list').map((p) => [p.name, p.id]));
-  const issues = mj('issue', 'list', '--limit', '100').issues.filter((i) => projects[i.project_id])
-    .map((i) => meta(i, P)).sort((a, b) => a.number - b.number);
+  const runs = loadRuns(), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
+  const projects = Object.fromEntries(tj('project', 'list').filter((p) => CFG.projects[p.name])
+    .map((p) => [p.id, Object.assign(CFG.projects[p.name], { key: p.identifier })]));
+  // todo + active is everything the scheduler acts on (backlog = not ready yet: the human moves it to todo).
+  const issues = Object.values(projects).flatMap((p) => ['todo', 'active'].flatMap((s) => tj('issue', 'list', '-p', p.key, '--status', s, '--limit', '100')))
+    .map((i) => meta(tj('issue', 'get', i.identifier), notified)).sort((a, b) => a.project_id - b.project_id || a.sequence - b.sequence);
   const byKey = Object.fromEntries(issues.map((i) => [i.identifier, i]));
-  const statusOf = (k) => (byKey[k] ??= mj('issue', 'get', k)).status;
+  const statusOf = (k) => (byKey[k] ??= meta(tj('issue', 'get', k))).status;
   for (const [id, p] of Object.entries(projects)) {
-    try { refinery(p, byKey, id); } catch (e) { log(`rq${p.repo}`, 'refinery error', p.repo, e.message.split('\n')[0]); }
+    try { refinery(p, byKey, +id); } catch (e) { log(`rq${p.repo}`, 'refinery error', p.repo, e.message.split('\n')[0]); }
   }
 
-  // Tell the human once per needs-human episode (state = the `notified` property, so restarts don't re-ping).
-  for (const i of issues.filter((x) => !CLOSED.includes(x.status) && CFG.notify?.ntfy && P.notified)) {
+  // A closed issue gives its worktree and session back (after-landing issues close only when their agent says so).
+  for (const key of Object.keys(runs)) {
+    const i = try_(() => (statusOf(key), byKey[key]));
+    if (i && CLOSED.includes(i.status) && !alive(runs[key])) { forget(projects[i.project_id], key, runs); log(null, 'cleanup', key); }
+  }
+
+  // Tell the human once per needs-human episode (state/notified.json, so restarts don't re-ping).
+  for (const i of issues.filter(() => CFG.notify?.ntfy)) {
     const step = notifyStep(i);
     if (step === 'notify') {
       try_(() => run('curl', ['-fsS', '-m', '10', '-H', `Title: ${i.identifier} needs you`, '-d', i.title, CFG.notify.ntfy]));
-      m('issue', 'property', 'set', i.identifier, '--name', 'notified', '--value', '1');
-      log(null, 'notify', i.identifier);
-    } else if (step === 'clear') m('issue', 'property', 'unset', i.identifier, '--name', 'notified');
+      notified.push(i.identifier); log(null, 'notify', i.identifier);
+    } else if (step === 'clear') notified.splice(notified.indexOf(i.identifier), 1);
+    if (step) writeFileSync(NOTIFIED, JSON.stringify(notified));
   }
 
-  for (const i of issues.filter((x) => !CLOSED.includes(x.status) && assigned(x, projects[x.project_id]) && x.labels.includes(CFG.freshLabel))) {
-    const step = freshStep(i, true, mj('issue', 'runs', i.identifier, '--active').length);
-    if (step === 'rerun') restartFresh(i); else log(`f${i.identifier}`, 'fresh', i.identifier, 'waits for the active run to end');
+  const flying = (i) => ['in_progress', 'in_review'].includes(i.status);
+  for (const i of issues.filter((x) => flying(x) && x.labels.includes(CFG.freshLabel))) {
+    const step = freshStep(i, true, alive(runs[i.identifier]) ? 1 : 0);
+    if (step === 'rerun') restartFresh(projects[i.project_id], i, runs); else log(`f${i.identifier}`, 'fresh', i.identifier, 'waits for the active run to end');
   }
 
-  // Park: an assigned issue that waits on a blocker or a human leaves the flight once its run has ended.
-  for (const i of issues.filter((x) => assigned(x, projects[x.project_id]) && !CLOSED.includes(x.status))) {
-    const why = whyNot(i, [], statusOf);
-    if (!why || mj('issue', 'runs', i.identifier, '--active').length) continue;
-    m('issue', 'assign', i.identifier, '--unassign');
-    i.assignee_id = i.assignee_type = null;
-    log(null, 'park', i.identifier, why);
+  // In progress = the agent owes a hand-off: keep it running until it adds the review label, parks on a blocker or a
+  // human, or closes the issue. A handed-off or parked issue starts the count of fruitless runs afresh.
+  for (const i of issues.filter((x) => x.status === 'in_review' && runs[x.identifier]?.n)) { runs[i.identifier].n = 0; saveRuns(runs); }
+  for (const i of issues.filter((x) => x.status === 'in_progress')) {
+    const r = runs[i.identifier], why = whyNot(i, [], statusOf), step = runStep(alive(r), why, r?.n ?? 0);
+    if (step === 'park') {
+      t('issue', 'update', i.identifier, '--status=todo'); i.status = 'todo';
+      if (r) { r.n = 0; saveRuns(runs); }
+      log(null, 'park', i.identifier, why);
+    } else if (step === 'stuck') {
+      comment(i.identifier, `Bridge: ${r.n} agent runs in a row ended without a hand-off, a blocker or a question. Log: ${DIR}/logs/${i.identifier}.log`);
+      relabel(i.identifier, 'add', CFG.humanLabel); i.labels.push(CFG.humanLabel);
+      log(null, 'stuck', i.identifier, `after ${r.n} runs`);
+    } else if (step === 'start') start(projects[i.project_id], i, runs);
   }
 
-  // Assign when ready (oldest first).
-  const flight = issues.filter((i) => assigned(i, projects[i.project_id]) && !CLOSED.includes(i.status));
-  // backlog = not ready yet (the human moves it to todo); Multica starts no run for it, so assigning would only hold a flight slot.
-  for (const i of issues.filter((x) => !x.assignee_id && !CLOSED.includes(x.status) && !['in_review', 'backlog'].includes(x.status))) {
+  // Start when ready (oldest first).
+  const flight = issues.filter(flying);
+  for (const i of issues.filter((x) => x.status === 'todo')) {
     const p = projects[i.project_id];
-    if (i.labels.includes(CFG.humanLabel)) continue; // human-owned (spec approval, QA): no footprint call, no assign
+    if (i.labels.includes(CFG.humanLabel)) continue; // human-owned (spec approval, QA): no footprint call, no run
     i.footprint ??= estimateFootprint(p, i);
     const why = whyNot(i, flight, statusOf);
     if (why) { log(i.identifier, 'wait', i.identifier, why); continue; }
-    if (i.status === 'blocked') m('issue', 'status', i.identifier, 'todo', '--no-start');
-    if (freshStep(i, false, 0) === 'on-assign') { m('issue', 'assign', i.identifier, '--to-id', p.agent, '--no-start'); restartFresh(i); }
-    else m('issue', 'assign', i.identifier, '--to-id', p.agent);
-    flight.push(i);
+    if (freshStep(i, false, 0) === 'on-assign') restartFresh(p, i, runs);
+    t('issue', 'update', i.identifier, '--status=active'); i.status = 'in_progress';
     log(i.identifier, 'assign', i.identifier, p.repo, `footprint=${i.footprint.join(',')}`);
+    start(p, i, runs);
+    flight.push(i);
   }
 }
 
-// On start, push each project's instruction file to its agent (one agent may serve several projects).
-function syncAgents() {
-  const all = Object.values(CFG.projects), byAgent = Object.fromEntries(all.map((p) => [p.agent, p.instructions]));
-  for (const [id, f] of Object.entries(byAgent)) {
-    m('agent', 'update', id, '--instructions', brief(readFileSync(resolve(ROOT, f), 'utf8'), all.filter((p) => p.agent === id)));
-  }
+// Agents call the tracker as plain `lific …`: a wrapper on their PATH pins the HTTP backend (URL and key come from the env).
+function agentBin() {
+  mkdirSync(`${DIR}/bin`, { recursive: true });
+  writeFileSync(`${DIR}/bin/lific`, `#!/bin/sh\nexec "${CFG.lific.bin}" --backend http "$@"\n`); chmodSync(`${DIR}/bin/lific`, 0o755);
 }
 const loop = async () => {
-  for (syncAgents(); ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {
+  for (; ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {
     try { tick(); } catch (e) { log('err', 'tick error', e.message.split('\n')[0]); }
   }
 };
-if (process.argv[1] === fileURLToPath(import.meta.url)) mkdirSync(DIR, { recursive: true }), process.argv.includes('--once') ? tick() : loop();
+if (process.argv[1] === fileURLToPath(import.meta.url)) mkdirSync(DIR, { recursive: true }), agentBin(), process.argv.includes('--once') ? tick() : loop();

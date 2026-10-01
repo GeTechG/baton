@@ -1,11 +1,10 @@
-// node --test bridge.test.mjs — the bridge's pure scheduling logic (no Multica, no GitHub).
+// node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, releaseLate, brief, fpOf, runStep, agentEnv } from './baton.mjs';
 
-const P = { footprint: 'fp-id', 'blocked-by': 'bb-id' };
-const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id,
-  labels: labels.map((name) => ({ name })), properties: { 'fp-id': props.fp, 'bb-id': props.bb } }, P);
+const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
+  description: props.fp == null ? 'Do the thing.' : `Do the thing.\n\nfootprint: ${props.fp}`, blocked_by: props.bb });
 
 test('footprint parsing: backticks, trailing punctuation, bullets, prose', () => {
   assert.deepEqual(list('`src/a.js`, `test/greet.test.js`'), ['src/a.js', 'test/greet.test.js']); // round-1 Haiku bug
@@ -14,10 +13,29 @@ test('footprint parsing: backticks, trailing punctuation, bullets, prose', () =>
   assert.deepEqual(list(undefined), []);
 });
 
-test('blocked-by parsing', () => {
-  assert.deepEqual(issue('OS-2', { bb: 'OS-12, `OS-13`.' }).blockedBy, ['OS-12', 'OS-13']);
+test('tracker issue -> scheduler terms: footprint line, native blockers, review label', () => {
+  assert.deepEqual(issue('OS-2', { bb: ['OS-12', 'LIB-3'] }).blockedBy, ['OS-12', 'LIB-3']);
   assert.deepEqual(issue('OS-2').blockedBy, []);
-  assert.equal(issue('OS-2').footprint, null); // missing property => bridge estimates it
+  assert.equal(issue('OS-2').footprint, null); // no footprint line => baton estimates it
+  assert.deepEqual(fpOf('Text.\nFootprint: `src/a.js`, test/a.test.js.\nMore text.'), ['src/a.js', 'test/a.test.js']);
+  assert.deepEqual(fpOf('footprint:'), []); // declared empty: overlaps everything
+  assert.equal(meta({ identifier: 'K-1', status: 'active', labels: [] }).status, 'in_progress');
+  assert.equal(meta({ identifier: 'K-1', status: 'active', labels: ['in-review'] }).status, 'in_review');
+  assert.equal(meta({ identifier: 'K-1', status: 'todo', labels: ['in-review'] }).status, 'todo');
+  assert.equal(meta({ identifier: 'K-1', status: 'todo' }, ['K-1']).notified, true);
+});
+
+test('run decision: leave a live agent alone, park a waiting issue, restart a quiet one, give up after max runs', () => {
+  assert.equal(runStep(true, 'needs-human', 9, 3), null);
+  assert.equal(runStep(false, 'blocked by LIB-3', 1, 3), 'park');
+  assert.equal(runStep(false, null, 0, 3), 'start');
+  assert.equal(runStep(false, null, 2, 3), 'start');
+  assert.equal(runStep(false, null, 3, 3), 'stuck');
+});
+
+test('agent env: AGENT_X becomes X and overrides, baton-only values stay out of reach of the rename', () => {
+  assert.deepEqual(agentEnv({ HOME: '/h', LIFIC_API_KEY: 'baton', AGENT_LIFIC_API_KEY: 'bot', AGENT_GH_TOKEN: 't' }, { LIFIC_URL: 'u' }),
+    { HOME: '/h', LIFIC_API_KEY: 'bot', GH_TOKEN: 't', LIFIC_URL: 'u' });
 });
 
 test('overlaps: path prefix, directory, disjoint, empty is conservative', () => {
@@ -37,8 +55,8 @@ test('ready decision', () => {
   assert.equal(whyNot(t2, [t1], statusOf), null);
   assert.equal(whyNot(lib, [t1], statusOf), null); // same path, other project
   assert.equal(whyNot(t3, [t1], statusOf), 'footprint overlaps OS-1');
-  assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: 'OS-12, OS-13' }), [], statusOf), 'blocked by OS-12');
-  assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: 'OS-13' }), [], statusOf), null);
+  assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-12', 'OS-13'] }), [], statusOf), 'blocked by OS-12');
+  assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-13'] }), [], statusOf), null);
   assert.equal(whyNot(issue('OS-5', { fp: 'src/d.js' }, ['gate:spec', 'needs-human']), [], statusOf), 'needs-human');
   const full = ['x1', 'x2', 'x3', 'x4'].map((k) => issue(k, { fp: `src/${k}.js` }));
   assert.equal(whyNot(t2, full, statusOf), 'in flight 4');
@@ -113,12 +131,17 @@ test('repo map: files for a small repo, directories at the deepest depth that fi
 });
 
 test('watch: one line per tool call, quiet on clean results, loud on failures', async () => {
-  const { line } = await import('./watch.mjs');
-  const at = { created_at: '2026-01-01T10:20:30.000Z' };
-  assert.match(line('K-1', { ...at, type: 'tool_use', tool: 'Bash', input: { description: 'Run tests', command: 'npm test' } }), /10:20:30 K-1 Bash Run tests$/);
-  assert.equal(line('K-1', { ...at, type: 'tool_result', output: 'ok 12 passed' }), null);
-  assert.match(line('K-1', { ...at, type: 'tool_result', output: 'Error: boom' }), /✖ Error: boom/);
-  assert.match(line('K-1', { ...at, type: 'text', content: 'Opening the PR' }), /Opening the PR/);
+  const { lines } = await import('./watch.mjs');
+  const use = { type: 'assistant', message: { content: [{ type: 'text', text: 'Opening the PR' },
+    { type: 'tool_use', name: 'Bash', input: { description: 'Run tests', command: 'npm test' } }] } };
+  const [text, tool] = lines('K-1', JSON.stringify(use), '10:20:30');
+  assert.match(text, /10:20:30 K-1 Opening the PR$/);
+  assert.match(tool, /10:20:30 K-1 Bash Run tests$/);
+  const result = (content, is_error) => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content, is_error }] } });
+  assert.deepEqual(lines('K-1', result('ok 12 passed', false), ''), []);
+  assert.match(lines('K-1', result([{ type: 'text', text: 'Error: boom' }], true), '')[0], /✖ Error: boom/);
+  assert.match(lines('K-1', 'not json: a crash trace', '')[0], /not json: a crash trace/); // whatever the agent CLI prints raw
+  assert.deepEqual(lines('K-1', JSON.stringify({ type: 'system', subtype: 'init' }), ''), []);
 });
 
 test('fresh label: rerun when idle, wait while a run is active, defer to assignment when parked', () => {
@@ -139,8 +162,8 @@ test('release gate: tag of the landed commit, none unless configured', () => {
 });
 
 test('brief: {{projects}} lists base branch, PR branch and check of every project the agent serves', () => {
-  const ps = [{ repo: 'o/lib', base: 'development', branchPrefix: 'mc/', check: 'make test | tee log' }, { repo: 'o/app', base: 'main', branchPrefix: 'mc/' }];
-  assert.equal(brief('Projects:\n{{projects}}\nEnd', ps), 'Projects:\n- o/lib: base branch `development`, PR branch `mc/<KEY>`, check: `make test | tee log`\n' +
+  const ps = [{ key: 'LIB', repo: 'o/lib', base: 'development', branchPrefix: 'mc/', check: 'make test | tee log' }, { repo: 'o/app', base: 'main', branchPrefix: 'mc/' }];
+  assert.equal(brief('Projects:\n{{projects}}\nEnd', ps), 'Projects:\n- LIB = o/lib: base branch `development`, PR branch `mc/<KEY>`, check: `make test | tee log`\n' +
     '- o/app: base branch `main`, PR branch `mc/<KEY>`, check: none configured\nEnd');
   assert.equal(brief('no placeholder', ps), 'no placeholder');
 });
