@@ -1,7 +1,7 @@
 // node --test bridge.test.mjs — the bridge's pure scheduling logic (no Multica, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap, freshStep, releaseTag, brief } from './baton.mjs';
 
 const P = { footprint: 'fp-id', 'blocked-by': 'bb-id' };
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id,
@@ -76,6 +76,7 @@ test('batch decisions', () => {
   assert.deepEqual(batchStep({ ...batch, prs: [X, Y, Z, { number: 4 }] }, 'b', red, []).prs, [X, Y]);
   assert.deepEqual(batchStep({ ...batch, prs: [Y] }, 'b', red, []), { act: 'sendback' });
   assert.deepEqual(batchStep(batch, 'moved', ok, []), { act: 'rebuild' });
+  assert.deepEqual(batchStep({ ...batch, landed: true }, 'moved', [], []), { act: 'land' }); // landed, release awaited: never rebuilt
 });
 
 test('branch key and gate-less repos', () => {
@@ -126,4 +127,16 @@ test('fresh label: rerun when idle, wait while a run is active, defer to assignm
   assert.equal(freshStep(i(['fresh']), true, 0), 'rerun');
   assert.equal(freshStep(i(['fresh']), true, 1), 'wait');
   assert.equal(freshStep(i(['fresh', 'needs-human']), false, 0), 'on-assign');
+});
+
+test('release gate: tag of the landed commit, none unless configured', () => {
+  assert.equal(releaseTag({ release: 'build-{sha}' }, 'abc'), 'build-abc');
+  assert.equal(releaseTag({}, 'abc'), null);
+});
+
+test('brief: {{projects}} lists base branch, PR branch and check of every project the agent serves', () => {
+  const ps = [{ repo: 'o/lib', base: 'development', branchPrefix: 'mc/', check: 'make test | tee log' }, { repo: 'o/app', base: 'main', branchPrefix: 'mc/' }];
+  assert.equal(brief('Projects:\n{{projects}}\nEnd', ps), 'Projects:\n- o/lib: base branch `development`, PR branch `mc/<KEY>`, check: `make test | tee log`\n' +
+    '- o/app: base branch `main`, PR branch `mc/<KEY>`, check: none configured\nEnd');
+  assert.equal(brief('no placeholder', ps), 'no placeholder');
 });
