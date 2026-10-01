@@ -81,12 +81,18 @@ export function candidates(prs, byKey, batch, p) {
 // Queue decision. base = current tip of the base branch; checks = the batch commit's check runs.
 export function batchStep(batch, base, checks, ready, names = 'all') {
   if (!batch) return ready.length ? { act: 'form', prs: ready } : { act: 'idle' };
-  if (base === batch.sha) return { act: 'land' }; // already fast-forwarded (restart mid-land): just finish
+  if (base === batch.sha || batch.landed) return { act: 'land' }; // already fast-forwarded (restart mid-land, release wait): just finish
   if (base !== batch.base) return { act: 'rebuild' };
   const s = rollup(checks, names);
   if (s !== 'red') return { act: s === 'green' ? 'land' : 'wait' };
   return batch.prs.length > 1 ? { act: 'bisect', prs: batch.prs.slice(0, batch.prs.length >> 1) } : { act: 'sendback' };
 }
+// cfg project.release, e.g. 'build-{sha}': the GitHub release that must exist for the landed commit before its issues
+// close (a consumer pins that commit and needs the build). null = no release gate.
+export const releaseTag = (p, sha) => p.release?.replace('{sha}', sha) ?? null;
+// Agent instructions with {{projects}} replaced by what a shared, project-independent worker cannot guess per repo.
+export const brief = (text, ps) => text.replace('{{projects}}', ps.map((p) => `- ${p.repo}: base branch \`${p.base}\`, ` +
+  `PR branch \`${p.branchPrefix}<KEY>\`, check: ${p.check ? `\`${p.check}\`` : 'none configured'}`).join('\n'));
 
 // The path list for the footprint prompt: every file while the repo is small, otherwise its directories cut to the
 // deepest level that still fits the budget (so every top-level area stays visible rather than an alphabetical prefix).
@@ -171,7 +177,12 @@ function form(p, git, prs, byKey, base) {
 const drop = (p, git, batch) => { try_(() => git('push', '-q', 'origin', '--delete', batch.branch)); rmSync(stateFile(p), { force: true }); };
 
 function land(p, git, batch, base, byKey) {
-  if (base !== batch.sha) git('push', '-q', 'origin', `${batch.sha}:refs/heads/${p.base}`); // non-force: fast-forward or fail
+  if (base !== batch.sha && !batch.landed) git('push', '-q', 'origin', `${batch.sha}:refs/heads/${p.base}`); // non-force: fast-forward or fail
+  if (!batch.landed) writeFileSync(stateFile(p), JSON.stringify({ ...batch, landed: true })); // base may move on while a release is awaited
+  const tag = releaseTag(p, batch.sha);
+  if (tag && try_(() => gh('release', 'view', tag, '-R', p.repo, '--json', 'isDraft', '-q', '.isDraft')) !== 'false') {
+    return log(`rel${p.repo}`, 'landed, waiting for release', p.repo, tag); // ponytail: waits forever if the build fails; add a timeout + needs-human if it happens
+  }
   for (const pr of batch.prs) {
     let state = null, ref = null; // GitHub marks the PR merged once its head is reachable from base (asynchronously)
     for (let n = 0; n < 10 && state !== 'MERGED'; n++, state === 'MERGED' || spawnSync('sleep', ['2'])) {
@@ -267,8 +278,10 @@ function tick() {
 
 // On start, push each project's instruction file to its agent (one agent may serve several projects).
 function syncAgents() {
-  const byAgent = Object.fromEntries(Object.values(CFG.projects).map((p) => [p.agent, p.instructions]));
-  for (const [id, f] of Object.entries(byAgent)) m('agent', 'update', id, '--instructions', readFileSync(resolve(ROOT, f), 'utf8'));
+  const all = Object.values(CFG.projects), byAgent = Object.fromEntries(all.map((p) => [p.agent, p.instructions]));
+  for (const [id, f] of Object.entries(byAgent)) {
+    m('agent', 'update', id, '--instructions', brief(readFileSync(resolve(ROOT, f), 'utf8'), all.filter((p) => p.agent === id)));
+  }
 }
 const loop = async () => {
   for (syncAgents(); ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {
