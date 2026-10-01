@@ -84,13 +84,25 @@ export function batchStep(batch, base, checks, ready, names = 'all') {
   return batch.prs.length > 1 ? { act: 'bisect', prs: batch.prs.slice(0, batch.prs.length >> 1) } : { act: 'sendback' };
 }
 
+// The path list for the footprint prompt: every file while the repo is small, otherwise its directories cut to the
+// deepest level that still fits the budget (so every top-level area stays visible rather than an alphabetical prefix).
+export function repoMap(paths, budget = 40000) {
+  const all = paths.join('\n');
+  if (all.length <= budget) return all;
+  for (let depth = 8; depth > 1; depth--) {
+    const dirs = [...new Set(paths.map((f) => f.split('/').slice(0, -1).slice(0, depth).join('/') + '/'))].join('\n');
+    if (dirs.length <= budget) return dirs;
+  }
+  return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
+}
+
 const assigned = (i, p) => i.assignee_type === 'agent' && i.assignee_id === p?.agent;
 
 function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
-  const files = gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path');
-  const out = run('claude', ['-p', '--model', 'haiku', '--max-turns', '1',
-    `Repo files:\n${files}\n\nTask:\n${i.title}\n${i.description ?? ''}\n\n${p.footprintHint ?? ''}\n` +
-    'Reply with ONLY a comma-separated list of repo paths this task will create or edit.']);
+  const files = repoMap(gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path').split('\n'));
+  const prompt = `Repo paths:\n${files}\n\nTask:\n${i.title}\n${i.description ?? ''}\n\n${p.footprintHint ?? ''}\n` +
+    'Reply with ONLY a comma-separated list of repo paths this task will create or edit.';
+  const out = execFileSync('claude', ['-p', '--model', 'haiku', '--max-turns', '1'], { input: prompt, encoding: 'utf8' }).trim(); // stdin: argv has a size limit
   const fp = list(out);
   m('issue', 'property', 'set', i.identifier, '--name', 'footprint', '--value', fp.join(', '));
   log(null, 'footprint', i.identifier, fp.join(', '));

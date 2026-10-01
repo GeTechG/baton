@@ -1,7 +1,7 @@
 // node --test bridge.test.mjs — the bridge's pure scheduling logic (no Multica, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep } from './baton.mjs';
+import { list, overlaps, meta, whyNot, rollup, candidates, batchStep, keyOf, notifyStep, repoMap } from './baton.mjs';
 
 const P = { footprint: 'fp-id', 'blocked-by': 'bb-id' };
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id,
@@ -100,4 +100,13 @@ test('prChecks none: a PR with no CI of its own is batch-ready', () => {
   const prs = [{ number: 1, headRefName: 'change/K-1-x', headRefOid: 'h1', statusCheckRollup: [] }];
   assert.deepEqual(candidates(prs, { 'K-1': { status: 'in_review' } }, null, p).ready.map((x) => x.key), ['K-1']);
   assert.deepEqual(candidates(prs, { 'K-1': { status: 'in_review' } }, null, { ...p, prChecks: undefined }).ready, []);
+});
+
+test('repo map: files for a small repo, directories at the deepest depth that fits for a big one', () => {
+  assert.equal(repoMap(['a.js', 'src/b.js']), 'a.js\nsrc/b.js');
+  const big = Array.from({ length: 5000 }, (_, n) => `pkg${n % 7}/src/mod${n % 300}/file${n}.hx`);
+  const deep = repoMap(big, 40000).split('\n');
+  assert.equal(deep.length, 2100); // pkgN/src/modM/ — all dirs fit
+  const shallow = repoMap(big, 1000).split('\n');
+  assert.deepEqual(shallow, ['pkg0/src/', 'pkg1/src/', 'pkg2/src/', 'pkg3/src/', 'pkg4/src/', 'pkg5/src/', 'pkg6/src/']);
 });
