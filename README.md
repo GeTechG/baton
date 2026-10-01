@@ -23,6 +23,7 @@ Nothing project-specific lives in this repo: `config.json`, `.env` and your inst
 `agents/default.md` is only a generic starting point.
 
 ## Tests
+- `node watch.mjs` — live view of what every in-flight agent is doing (run it in a spare terminal pane).
 - `npm test` — pure logic (footprints, readiness, batch decisions).
 - `e2e/` — the end-to-end bench on throwaway repos `GeTechG/orch-spike-{app,lib}`: `e2e/SCENARIO.md`, `e2e/reset.sh`.
   Scripts there hold instance-specific Multica ids — refresh them after re-creating the instance.
