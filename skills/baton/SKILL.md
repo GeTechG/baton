@@ -34,6 +34,8 @@ keep you from fighting the scheduler.
 - An issue is done as planned. What comes up on the way: same area, small and needing no decision — done in the same
   issue and mentioned in the comment; same area but larger — a sub-issue (`--parent`); unrelated — a separate issue;
   work for another project — an issue there, listed in `blocked-by` of the one that needs it. All filed unassigned.
+- An issue that asks for a review is done when the review comes back clean: its findings are fixed in the same issue
+  and the review is run again, not filed as new issues. Write "read-only" in the issue if you want only the report.
 
 ## How an issue becomes ready
 
