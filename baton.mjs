@@ -1,21 +1,20 @@
 #!/usr/bin/env node
-// Scheduler + batch merge queue between Multica and GitHub; everything project-specific is in config.json ($BATON_CONFIG).
-// Scheduling is stateless: humans file issues UNASSIGNED, only the bridge assigns the agent; text properties `blocked-by`
-// and `footprint` gate readiness; cfg.humanLabel parks; status in_review = agent handed off a PR on <branchPrefix><KEY>.
-// Queue (Bors-style): green PRs merge --no-ff into batch/<ts> on base; base fast-forwards only to a batch whose exact tree
-// passed CI; red -> bisect. Batch cached in batch-<repo>.json, recoverable from the remote branch's merge subjects.
-// ponytail: prefix-match footprints, a 100-issue page, serial bisect; add globbing/paging/parallel bisect if they hurt.
-import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdirSync } from 'node:fs';
+// Scheduler between Multica and the repos its agents work in; everything project-specific is in config.json ($BATON_CONFIG).
+// Humans file issues UNASSIGNED. When no agent run is active, the orchestrator (one model call) looks at the waiting
+// issues and picks the next wave: which start now and which agent takes each. Hard gates it cannot override: backlog,
+// `blocked-by`, cfg.humanLabel, overlapping `footprint`. How a change reaches the base branch and who sets done is
+// the repo's and the agent's business, not the bridge's.
+// ponytail: prefix-match footprints, a 100-issue page, orchestrator runs on the claude CLI only; add globbing/paging/other runtimes if they hurt.
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Relative paths in the config (multica.bin, stateDir, instructions) resolve against the baton checkout.
+// Relative paths in the config (multica.bin, stateDir) resolve against the baton checkout.
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.afterLandLabel ??= 'after-landing'; CFG.maxInFlight ??= 4; CFG.tickSec ??= 5;
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.maxWave ??= 5; CFG.tickSec ??= 5;
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.multica) CFG.multica.bin = resolve(ROOT, CFG.multica.bin);
 
@@ -29,10 +28,10 @@ const log = (key, ...a) => {
 const run = (bin, args) => execFileSync(bin, args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 const m = (...a) => run(CFG.multica.bin, ['--profile', CFG.multica.profile, '--server-url', CFG.multica.server, ...a]);
 const mj = (...a) => JSON.parse(m(...a, '--output', 'json') || 'null');
-const gh = (...a) => run('gh', a), ghj = (...a) => JSON.parse(gh(...a) || 'null');
+const gh = (...a) => run('gh', a);
 const try_ = (f) => { try { return f(); } catch { return null; } };
 
-// ---- pure logic (tested in bridge.test.mjs) ----
+// ---- pure logic (tested in baton.test.mjs) ----
 // list() takes a property value or raw Haiku output: comma/newline separated, quotes/backticks/bullets/trailing
 // punctuation stripped, prose (anything with a space) dropped.
 export const list = (s) => (s ?? '').split(/[,\n]/).map((x) => x.replace(/[`'"*]/g, '').trim().replace(/^- /, '').replace(/[.;:]+$/, ''))
@@ -46,56 +45,26 @@ export const notifyStep = (i) => (i.labels.includes(CFG.humanLabel) === i.notifi
 // always resumes). 'rerun' now | 'wait' for the active run to end | 'on-assign' when the scheduler next assigns it.
 export const freshStep = (i, isAssigned, activeRuns) =>
   (!i.labels.includes(CFG.freshLabel) ? null : !isAssigned ? 'on-assign' : activeRuns ? 'wait' : 'rerun');
-// null = ready to assign now; otherwise why not. statusOf(key) -> issue status.
-export function whyNot(i, flight, statusOf, max = CFG.maxInFlight) {
+// null = may start now; otherwise why not. flight = issues already held by agents or picked for this wave. statusOf(key) -> issue status.
+export function whyNot(i, flight, statusOf) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
   if (open.length) return `blocked by ${open}`;
   if (i.labels.includes(CFG.humanLabel)) return CFG.humanLabel;
   const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint));
-  if (clash) return `footprint overlaps ${clash.identifier}`;
-  return flight.length >= max ? `in flight ${flight.length}` : null;
+  return clash ? `footprint overlaps ${clash.identifier}` : null;
 }
-// Check runs (gh statusCheckRollup or the check-runs REST API) -> 'pending' | 'green' | 'red'.
-// names: 'all', a list, or 'none' (repo without a CI gate, e.g. a vendored fork validated by its consumer's CI).
-export function rollup(checks, names = 'all') {
-  if (names === 'none') return 'green';
-  const cs = checks.filter((c) => names === 'all' || names.includes(c.name));
-  if (names !== 'all' && names.some((n) => !cs.some((c) => c.name === n))) return 'pending'; // not registered yet
-  if (!cs.length || cs.some((c) => (c.status ?? 'completed').toLowerCase() !== 'completed')) return 'pending';
-  return cs.every((c) => ['success', 'skipped', 'neutral'].includes((c.conclusion ?? c.state ?? '').toLowerCase())) ? 'green' : 'red';
-}
-// Branch <prefix><KEY>[-slug] -> KEY (e.g. change/OS-12-tileset-fixes -> OS-12); null if not ours.
-export const keyOf = (ref, prefix) => (ref.startsWith(prefix) && /^[A-Z][A-Z0-9]*-\d+/.exec(ref.slice(prefix.length))?.[0]) || null;
-// Open PRs on the branch prefix whose issue is in_review and that are not in the batch -> { ready, red } (pending omitted).
-export function candidates(prs, byKey, batch, p) {
-  const inBatch = new Set((batch?.prs ?? []).map((x) => x.number)), out = { ready: [], red: [] };
-  for (const pr of [...prs].sort((a, b) => a.number - b.number)) {
-    const key = keyOf(pr.headRefName, p.branchPrefix);
-    if (!key || byKey[key]?.status !== 'in_review' || inBatch.has(pr.number)) continue;
-    const s = rollup(pr.statusCheckRollup ?? [], p.prChecks ?? p.checks); // prChecks 'none': PRs aren't gated, only the batch is
-    if (s !== 'pending') out[s === 'green' ? 'ready' : 'red'].push({ number: pr.number, key, head: pr.headRefOid });
+// What the orchestrator decided on; it is asked again only when this changes (so an empty wave is not re-asked every tick).
+export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.assignee_id, i.labels, i.blockedBy, i.footprint, i.title, i.description]));
+// Orchestrator reply, one `KEY agent-name` per line -> [{ key, agent }]; unknown keys/agents, repeats and prose are dropped.
+export function picks(out, keys, agents) {
+  const res = [];
+  for (const l of out.split('\n')) {
+    const mm = /([A-Z][A-Z0-9]*-\d+)\W+(.+)/.exec(l), name = mm?.[2].replace(/[`*"'.]/g, '').trim().toLowerCase();
+    const agent = agents.find((a) => a.toLowerCase() === name);
+    if (agent && keys.includes(mm[1]) && !res.some((r) => r.key === mm[1])) res.push({ key: mm[1], agent });
   }
-  out.ready = out.ready.slice(0, p.maxBatch);
-  return out;
+  return res;
 }
-// Queue decision. base = current tip of the base branch; checks = the batch commit's check runs.
-export function batchStep(batch, base, checks, ready, names = 'all') {
-  if (!batch) return ready.length ? { act: 'form', prs: ready } : { act: 'idle' };
-  if (base === batch.sha || batch.landed) return { act: 'land' }; // already fast-forwarded (restart mid-land, release wait): just finish
-  if (base !== batch.base) return { act: 'rebuild' };
-  const s = rollup(checks, names);
-  if (s !== 'red') return { act: s === 'green' ? 'land' : 'wait' };
-  return batch.prs.length > 1 ? { act: 'bisect', prs: batch.prs.slice(0, batch.prs.length >> 1) } : { act: 'sendback' };
-}
-// cfg project.release, e.g. 'build-{sha}': the GitHub release that must exist for the landed commit before its issues
-// close (a consumer pins that commit and needs the build). null = no release gate.
-export const releaseTag = (p, sha) => p.release?.replace('{sha}', sha) ?? null;
-// A landed batch whose release has not shown up in time (once per batch; batch.landed = ms it landed).
-export const releaseLate = (batch, now, min = 60) => !batch.late && now - batch.landed > min * 60e3;
-// Agent instructions with {{projects}} replaced by what a shared, project-independent worker cannot guess per repo.
-export const brief = (text, ps) => text.replace('{{projects}}', ps.map((p) => `- ${p.repo}: base branch \`${p.base}\`, ` +
-  `PR branch \`${p.branchPrefix}<KEY>\`, check: ${p.check ? `\`${p.check}\`` : 'none configured'}`).join('\n'));
-
 // The path list for the footprint prompt: every file while the repo is small, otherwise its directories cut to the
 // deepest level that still fits the budget (so every top-level area stays visible rather than an alphabetical prefix).
 export function repoMap(paths, budget = 40000) {
@@ -108,7 +77,7 @@ export function repoMap(paths, budget = 40000) {
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
 }
 
-function restartFresh(i) { // fresh session + workdir; the agent rebuilds state from the branch, PR and issue
+function restartFresh(i) { // fresh session + workdir; the agent rebuilds state from the repo and the issue
   m('issue', 'rerun', i.identifier);
   const id = mj('label', 'list').find((l) => l.name === CFG.freshLabel)?.id;
   if (id) m('issue', 'label', 'remove', i.identifier, id);
@@ -116,7 +85,11 @@ function restartFresh(i) { // fresh session + workdir; the agent rebuilds state 
   log(null, 'fresh', i.identifier, 'rerun with a clean session');
 }
 
-const assigned = (i, p) => i.assignee_type === 'agent' && i.assignee_id === p?.agent;
+// In flight = held by any agent, not only the project's: the first agent may hand the issue on (`multica issue assign`),
+// and it must keep its footprint and flight slot. A human assignee is never the bridge's business.
+export const assigned = (i) => i.assignee_type === 'agent';
+// Manual board order (what the human dragged higher goes first); issue number breaks ties.
+export const byBoard = (a, b) => a.position - b.position || a.number - b.number;
 
 function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
   const files = repoMap(gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path').split('\n'));
@@ -129,122 +102,34 @@ function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the 
   return fp;
 }
 
-function sendBack(p, pr, i, why) {
-  try_(() => gh('pr', 'comment', String(pr.number), '-R', p.repo, '--body', `bridge: ${why} — sent back to the agent`));
-  m('issue', 'status', pr.key, 'in_progress', '--no-start');
-  m('issue', 'comment', 'add', pr.key, '--content', `Bridge: PR #${pr.number} ${why}. Fix it on that PR's branch ` +
-    `(git fetch && git rebase origin/${p.base}, resolve, re-test, force-push), then set in_review again.`);
-  if (i) i.status = 'in_progress';
-  log(null, 'send-back', p.repo, `#${pr.number}`, pr.key, why);
+// One model call, no tools: the model and extra guidance come from the Multica agent cfg.orchestrator (edit them in the UI).
+function orchestrate(projects, issues, waiting, agents) {
+  const o = mj('agent', 'get', CFG.orchestrator), repo = (i) => projects[i.project_id].repo;
+  const rules = [...new Set(waiting.map((i) => projects[i.project_id]))].map((p) => `## ${p.repo}\n` +
+    (try_(() => gh('api', `repos/${p.repo}/contents/AGENTS.md?ref=${p.base}`, '-H', 'Accept: application/vnd.github.raw'))?.slice(0, 8000) ?? '(no AGENTS.md)'));
+  const line = (i) => `- ${i.identifier} [${repo(i)}] ${i.status}${i.assignee_id ? ', held by an agent' : ''}${i.blockedBy.length ? `, blocked-by ${i.blockedBy}` : ''}: ${i.title}`;
+  const prompt = 'You are the orchestrator of a team of coding agents. Nothing is running right now. Decide which of the WAITING ' +
+    'tasks start now, in parallel, and which agent takes each. Start a task only if it makes sense now: leave out one that ' +
+    'logically follows another waiting or unfinished task, or would collide with one you start. Starting nothing is a valid answer.\n\n' +
+    `# Agents\n${agents.map((a) => `- ${a.name}: ${a.description || '(no description)'}`).join('\n')}\n\n` +
+    `# Project rules\n${rules.join('\n\n')}\n\n` +
+    `# WAITING (the human's order: top = do first)\n${waiting.map((i) => `## ${i.identifier} [${repo(i)}] ${i.title}\nstatus: ${i.status === 'todo' ? 'todo (not started)' : `${i.status} (started earlier, parked)`}; labels: ${i.labels.join(', ') || '-'}; ` +
+      `footprint: ${i.footprint.join(', ') || '-'}\n${i.description ?? ''}`).join('\n\n')}\n\n` +
+    `# Other open tasks\n${issues.filter((i) => !CLOSED.includes(i.status) && !waiting.includes(i)).map(line).join('\n') || '-'}\n\n` +
+    `# Recently closed\n${issues.filter((i) => CLOSED.includes(i.status)).sort((a, b) => a.updated_at.localeCompare(b.updated_at)).slice(-15).map(line).join('\n') || '-'}\n\n` +
+    (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
+    'Reply with ONLY one line per task to start: `<KEY> <agent name>`. No other text.';
+  return execFileSync('claude', ['-p', '--model', o.model || 'sonnet', '--max-turns', '1'], { input: prompt, encoding: 'utf8' });
 }
 
-function clone(p) {
-  const dir = `${DIR}/refinery/${p.repo.replace('/', '__')}`, git = (...a) => run('git', ['-C', dir, ...a]);
-  if (!existsSync(dir)) run('git', ['clone', '-q', '-c', 'user.name=bridge', '-c', 'user.email=bridge@localhost', `https://github.com/${p.repo}.git`, dir]);
-  git('fetch', '-q', '--prune', 'origin', '+refs/heads/*:refs/remotes/origin/*');
-  return git;
-}
-const stateFile = (p) => `${DIR}/batch-${p.repo.replace('/', '__')}.json`;
-function loadBatch(p, git) {
-  const b = try_(() => JSON.parse(readFileSync(stateFile(p), 'utf8')));
-  if (b) return b;
-  const tip = git('for-each-ref', '--format=%(refname:short)', `refs/remotes/origin/${p.batchPrefix}`).split('\n').filter(Boolean).sort().pop();
-  if (!tip) return null;
-  const branch = tip.slice('origin/'.length), prs = []; let base = null; // walk this batch's merges back to base
-  for (const l of git('log', '--first-parent', '-n', '100', '--format=%P|%s', tip).split('\n')) {
-    const mm = l.match(/^(\S+) (\S+)\|Merge PR #(\d+) \((\S+)\) into (\S+)$/);
-    if (mm?.[5] !== branch) break;
-    prs.unshift({ number: +mm[3], key: mm[4], head: mm[2] }); base = mm[1];
-  }
-  const batch = { branch, sha: git('rev-parse', tip), base, prs };
-  writeFileSync(stateFile(p), JSON.stringify(batch));
-  log(null, 'recovered batch', p.repo, batch.branch, `#${prs.map((x) => x.number).join(',#')}`);
-  return batch;
-}
-
-function form(p, git, prs, byKey, base) {
-  const branch = `${p.batchPrefix}${new Date().toISOString().replace(/\D/g, '').slice(0, 17)}`, inBatch = [];
-  git('checkout', '-q', '--detach', base);
-  for (const pr of prs) {
-    try { git('merge', '--no-ff', '-q', '-m', `Merge PR #${pr.number} (${pr.key}) into ${branch}`, pr.head); inBatch.push(pr); }
-    catch { try_(() => git('merge', '--abort')); sendBack(p, pr, byKey[pr.key], `conflicts with ${p.base}/batch`); }
-  }
-  if (!inBatch.length) return null;
-  const batch = { branch, sha: git('rev-parse', 'HEAD'), base, prs: inBatch };
-  git('push', '-q', 'origin', `${batch.sha}:refs/heads/${branch}`);
-  writeFileSync(stateFile(p), JSON.stringify(batch));
-  log(null, 'batch', p.repo, branch, `#${inBatch.map((x) => x.number).join(',#')}`, batch.sha.slice(0, 7));
-  return batch;
-}
-const drop = (p, git, batch) => { try_(() => git('push', '-q', 'origin', '--delete', batch.branch)); rmSync(stateFile(p), { force: true }); };
-
-function land(p, git, batch, base, byKey) {
-  if (base !== batch.sha && !batch.landed) git('push', '-q', 'origin', `${batch.sha}:refs/heads/${p.base}`); // non-force: fast-forward or fail
-  if (!batch.landed) writeFileSync(stateFile(p), JSON.stringify(batch = { ...batch, landed: Date.now() })); // base may move on while a release is awaited
-  const tag = releaseTag(p, batch.sha);
-  if (tag && try_(() => gh('release', 'view', tag, '-R', p.repo, '--json', 'isDraft', '-q', '.isDraft')) !== 'false') {
-    if (releaseLate(batch, Date.now(), p.releaseTimeoutMin)) { // the build probably failed: tell the human once, keep waiting
-      const why = `release ${tag} of ${p.repo} is still missing ${p.releaseTimeoutMin ?? 60} min after landing on ${p.base}`;
-      for (const pr of batch.prs) m('issue', 'comment', 'add', pr.key, '--content', `Bridge: ${why}. Re-run its build; this issue closes once the release exists.`);
-      if (CFG.notify?.ntfy) try_(() => run('curl', ['-fsS', '-m', '10', '-H', `Title: ${p.repo} release missing`, '-d', why, CFG.notify.ntfy]));
-      writeFileSync(stateFile(p), JSON.stringify({ ...batch, late: true }));
-      log(null, 'release late', p.repo, tag);
-    }
-    return log(`rel${p.repo}`, 'landed, waiting for release', p.repo, tag);
-  }
-  for (const pr of batch.prs) {
-    let state = null, ref = null; // GitHub marks the PR merged once its head is reachable from base (asynchronously)
-    for (let n = 0; n < 10 && state !== 'MERGED'; n++, state === 'MERGED' || spawnSync('sleep', ['2'])) {
-      ({ state, headRefName: ref } = ghj('pr', 'view', String(pr.number), '-R', p.repo, '--json', 'state,headRefName'));
-    }
-    if (state === 'OPEN') gh('pr', 'close', String(pr.number), '-R', p.repo, '--comment', `bridge: landed on ${p.base} in ${batch.sha}`);
-    // cfg.afterLandLabel on an issue = its agent has post-landing steps: hand it back instead of closing; the agent sets done.
-    const after = byKey[pr.key]?.labels.includes(CFG.afterLandLabel);
-    m('issue', 'status', pr.key, after ? 'in_progress' : 'done', '--no-start');
-    if (after) m('issue', 'comment', 'add', pr.key, '--content', `Bridge: PR #${pr.number} landed on ${p.base} in ${batch.sha}. ` +
-      `Do your post-landing steps now, comment the result, then set this issue done.`);
-    try_(() => git('push', '-q', 'origin', '--delete', ref));
-    log(null, 'merged', p.repo, `#${pr.number}`, pr.key, `(${state})`, after ? '-> after-landing' : '-> done');
-  }
-  drop(p, git, batch);
-  log(null, 'landed', p.repo, batch.branch, batch.sha.slice(0, 7));
-}
-
-// One queue step per repo per tick. Skips GitHub entirely while nothing is in review and no batch is in flight.
-function refinery(p, byKey, projectId) {
-  const reviewing = Object.values(byKey).some((i) => i.project_id === projectId && i.status === 'in_review');
-  if (!reviewing && !existsSync(stateFile(p))) return;
-  const git = clone(p), base = git('rev-parse', `origin/${p.base}`);
-  const batch = loadBatch(p, git);
-  const prs = ghj('pr', 'list', '-R', p.repo, '--state', 'open', '--json', 'number,headRefName,headRefOid,statusCheckRollup');
-  const c = candidates(prs, byKey, batch, p);
-  for (const pr of c.red) sendBack(p, pr, byKey[pr.key], 'has red CI');
-  const checks = batch && base === batch.base ? ghj('api', `repos/${p.repo}/commits/${batch.sha}/check-runs`).check_runs : [];
-  const step = batchStep(batch, base, checks, c.ready, p.checks);
-  if (step.act === 'wait') log(`q${p.repo}`, 'batch pending', p.repo, batch.branch);
-  if (step.act === 'form') form(p, git, step.prs, byKey, base);
-  if (step.act === 'land') land(p, git, batch, base, byKey);
-  if (step.act === 'rebuild') { log(null, 'rebuild', p.repo, batch.branch, `${p.base} moved`); drop(p, git, batch); }
-  if (step.act === 'sendback') { drop(p, git, batch); sendBack(p, batch.prs[0], byKey[batch.prs[0].key], `fails CI together with ${p.base}`); }
-  if (step.act === 'bisect') {
-    log(null, 'bisect', p.repo, batch.branch, 'red; testing', `#${step.prs.map((x) => x.number).join(',#')}`);
-    const next = form(p, git, step.prs, byKey, base); // new batch first, then delete the old one: a crash never loses both
-    try_(() => git('push', '-q', 'origin', '--delete', batch.branch));
-    if (!next) rmSync(stateFile(p), { force: true });
-  }
-}
-
+let lastWave = null;
 function tick() {
   const projects = Object.fromEntries(mj('project', 'list').filter((p) => CFG.projects[p.title]).map((p) => [p.id, CFG.projects[p.title]]));
   const P = Object.fromEntries(mj('property', 'list').map((p) => [p.name, p.id]));
   const issues = mj('issue', 'list', '--limit', '100').issues.filter((i) => projects[i.project_id])
-    .map((i) => meta(i, P)).sort((a, b) => a.number - b.number);
+    .map((i) => meta(i, P)).sort(byBoard);
   const byKey = Object.fromEntries(issues.map((i) => [i.identifier, i]));
   const statusOf = (k) => (byKey[k] ??= mj('issue', 'get', k)).status;
-  for (const [id, p] of Object.entries(projects)) {
-    try { refinery(p, byKey, id); } catch (e) { log(`rq${p.repo}`, 'refinery error', p.repo, e.message.split('\n')[0]); }
-  }
-
   // Tell the human once per needs-human episode (state = the `notified` property, so restarts don't re-ping).
   for (const i of issues.filter((x) => !CLOSED.includes(x.status) && CFG.notify?.ntfy && P.notified)) {
     const step = notifyStep(i);
@@ -255,13 +140,13 @@ function tick() {
     } else if (step === 'clear') m('issue', 'property', 'unset', i.identifier, '--name', 'notified');
   }
 
-  for (const i of issues.filter((x) => !CLOSED.includes(x.status) && assigned(x, projects[x.project_id]) && x.labels.includes(CFG.freshLabel))) {
+  for (const i of issues.filter((x) => !CLOSED.includes(x.status) && assigned(x) && x.labels.includes(CFG.freshLabel))) {
     const step = freshStep(i, true, mj('issue', 'runs', i.identifier, '--active').length);
     if (step === 'rerun') restartFresh(i); else log(`f${i.identifier}`, 'fresh', i.identifier, 'waits for the active run to end');
   }
 
   // Park: an assigned issue that waits on a blocker or a human leaves the flight once its run has ended.
-  for (const i of issues.filter((x) => assigned(x, projects[x.project_id]) && !CLOSED.includes(x.status))) {
+  for (const i of issues.filter((x) => assigned(x) && !CLOSED.includes(x.status))) {
     const why = whyNot(i, [], statusOf);
     if (!why || mj('issue', 'runs', i.identifier, '--active').length) continue;
     m('issue', 'assign', i.identifier, '--unassign');
@@ -269,32 +154,32 @@ function tick() {
     log(null, 'park', i.identifier, why);
   }
 
-  // Assign when ready (oldest first).
-  const flight = issues.filter((i) => assigned(i, projects[i.project_id]) && !CLOSED.includes(i.status));
-  // backlog = not ready yet (the human moves it to todo); Multica starts no run for it, so assigning would only hold a flight slot.
-  for (const i of issues.filter((x) => !x.assignee_id && !CLOSED.includes(x.status) && !['in_review', 'backlog'].includes(x.status))) {
-    const p = projects[i.project_id];
-    if (i.labels.includes(CFG.humanLabel)) continue; // human-owned (spec approval, QA): no footprint call, no assign
-    i.footprint ??= estimateFootprint(p, i);
-    const why = whyNot(i, flight, statusOf);
-    if (why) { log(i.identifier, 'wait', i.identifier, why); continue; }
-    if (i.status === 'blocked') m('issue', 'status', i.identifier, 'todo', '--no-start');
-    if (freshStep(i, false, 0) === 'on-assign') { m('issue', 'assign', i.identifier, '--to-id', p.agent, '--no-start'); restartFresh(i); }
-    else m('issue', 'assign', i.identifier, '--to-id', p.agent);
-    flight.push(i);
-    log(i.identifier, 'assign', i.identifier, p.repo, `footprint=${i.footprint.join(',')}`);
+  // Wave: once nothing runs, the orchestrator picks from the startable issues, in board order. cfg.maxWave caps only the
+  // not yet started ones (todo); an unassigned issue in any other status was parked mid-work and is always offered.
+  const held = issues.filter((i) => assigned(i) && !CLOSED.includes(i.status));
+  // backlog = not ready yet (the human moves it to todo); in_review = waits for a review, not for an agent.
+  const free = issues.filter((x) => !x.assignee_id && !CLOSED.includes(x.status) && !['in_review', 'backlog'].includes(x.status) && !whyNot(x, [], statusOf));
+  const waiting = [...free.filter((x) => x.status !== 'todo'), ...free.filter((x) => x.status === 'todo').slice(0, CFG.maxWave)];
+  if (!waiting.length) return;
+  for (const i of waiting) i.footprint ??= estimateFootprint(projects[i.project_id], i);
+  if (snapshot(issues) === lastWave || held.some((i) => mj('issue', 'runs', i.identifier, '--active').length)) return;
+  const all = mj('agent', 'list'), agents = (all.agents ?? all).filter((a) => !a.archived_at && a.id !== CFG.orchestrator);
+  const wave = picks(orchestrate(projects, issues, waiting, agents), waiting.map((i) => i.identifier), agents.map((a) => a.name));
+  for (const { key, agent } of wave) {
+    const i = byKey[key], id = agents.find((a) => a.name === agent).id, why = whyNot(i, held, statusOf);
+    if (why) { log(null, 'wait', key, why); continue; }
+    if (i.status === 'blocked') m('issue', 'status', key, 'todo', '--no-start');
+    if (freshStep(i, false, 0) === 'on-assign') { m('issue', 'assign', key, '--to-id', id, '--no-start'); restartFresh(i); }
+    else m('issue', 'assign', key, '--to-id', id);
+    i.assignee_type = 'agent'; i.assignee_id = id; held.push(i);
+    log(null, 'assign', key, projects[i.project_id].repo, '->', agent, `footprint=${i.footprint.join(',')}`);
   }
+  log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : 'nothing to start', `of ${waiting.map((i) => i.identifier)}`);
+  lastWave = snapshot(issues);
 }
 
-// On start, push each project's instruction file to its agent (one agent may serve several projects).
-function syncAgents() {
-  const all = Object.values(CFG.projects), byAgent = Object.fromEntries(all.map((p) => [p.agent, p.instructions]));
-  for (const [id, f] of Object.entries(byAgent)) {
-    m('agent', 'update', id, '--instructions', brief(readFileSync(resolve(ROOT, f), 'utf8'), all.filter((p) => p.agent === id)));
-  }
-}
 const loop = async () => {
-  for (syncAgents(); ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {
+  for (;; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {
     try { tick(); } catch (e) { log('err', 'tick error', e.message.split('\n')[0]); }
   }
 };
