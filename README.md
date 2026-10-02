@@ -34,8 +34,21 @@ for it in a git worktree of your own checkout, and decides **what** reaches `mai
 3. `cp e2e/config.example.json config.json` and edit: repos, local checkouts, checks, batch/in-flight caps, footprint hint, instructions file.
 4. `scripts/up.sh` (or, with `.env` exported, `npm start` / `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
-`scripts/`: `up.sh` (checks the tracker, starts the baton loop, idempotent), `down.sh` (`--all` also kills the agent
+`scripts/`: `up.sh` (starts the tracker if it is down, then the baton loop, idempotent), `down.sh` (`--all` also kills the agent
 runs) and `status.sh`.
+
+Once set up, the whole thing (Lific + baton) starts and stops like this:
+
+```sh
+scripts/up.sh               # starts the tracker service if it is down (UI on :3456), then the baton loop
+scripts/status.sh           # tracker / baton / running agents / last log lines
+node watch.mjs              # live view of the agents
+
+scripts/down.sh             # stop baton (agents finish their run); --all kills them too
+bin/lific service stop      # stop the tracker (it returns on reboot)
+```
+
+baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `scripts/down.sh && scripts/up.sh`.
 
 ## Adding a project
 One entry in `config.json` `projects`: `repo`, `base` (any branch — `main`, `development`, …), `branchPrefix`, `batchPrefix`,
