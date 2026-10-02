@@ -13,7 +13,7 @@ in Multica) and the repo's own `AGENTS.md`.
   run has ended. It is asked again only when something about the issues changed.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open `blocked-by` issues (cross-project
   keys work), the `needs-human` label, and a `footprint` (Haiku-estimated if missing) that overlaps an issue an agent holds.
-- **Orchestrator:** a Multica agent (`orchestrator` in `config.json`) that is never assigned an issue: baton reads its
+- **Orchestrator:** a Multica agent (the one named `orchestrator`; `orchestrator` in `config.json` names another, by id or name) that is never assigned an issue: baton reads its
   model and instructions, so both are edited in the Multica UI. Its instructions are extra guidance for the choice.
 - **Hand-offs:** an agent passes an issue on with `multica issue assign <KEY> --to <agent>` when the repo's rules say so;
   it stays held (footprint, parking). A parked issue goes back to waiting for the next wave.
@@ -22,23 +22,26 @@ in Multica) and the repo's own `AGENTS.md`.
 
 ## Run
 1. Multica: `cp multica/.env.example multica/.env` (set secrets), `docker compose -p baton -f multica/docker-compose.yml up -d`;
-   put the CLI binary at `multica/bin/multica`, log in (`multica/m login`), start the daemon, create one project per repo + an agent.
+   put the CLI binary at `multica/bin/multica`, log in (`multica/m login`), start the daemon, create one project per repo,
+   then `scripts/agents.sh` creates the base agents from `agents/*.json` (`worker`, `orchestrator`) and gives them `GH_TOKEN` from `.env`.
 2. Write `config.json` (gitignored):
    ```json
    {
      "multica": { "bin": "multica/bin/multica", "profile": "baton", "server": "http://localhost:8080" },
-     "orchestrator": "<agent id from `multica/m agent list`>",
      "projects": {
        "<Multica project title>": { "repo": "owner/repo", "base": "main" }
      }
    }
    ```
-   Optional: `maxWave`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), per project `footprintHint`.
+   Optional: `orchestrator`, `maxWave`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), per project `footprintHint`.
 3. `npm start` (or `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
-`scripts/` wraps this for a single-machine instance: `up.sh` (containers → daemon → baton, idempotent), `down.sh`
-(`--all` also stops the containers), `status.sh`, `login-code.sh` (the web UI's one-time login code) and `agent-env.sh`
-(puts `GH_TOKEN` from `.env` into every agent's custom env).
+`scripts/` wraps this for a single-machine instance, so it comes down to two commands: `install.sh` once (writes
+`multica/.env` with a fresh `JWT_SECRET`, downloads the CLI, writes a `config.json` without projects, starts everything,
+logs in, creates the base agents; needs `.env` with `GH_TOKEN`; idempotent) and `up.sh` to run (containers → daemon →
+baton, idempotent). Also: `down.sh` (`--all` also stops the containers), `status.sh`, `login-code.sh` (the web UI's
+one-time login code), `agents.sh` (creates the agents in `agents/*.json` that are missing by name, existing ones are
+never overwritten, then runs `agent-env.sh`) and `agent-env.sh` (puts `GH_TOKEN` from `.env` into every agent's custom env).
 
 ## Adding a project
 One entry in `config.json` `projects`, keyed by the Multica project title: `repo` and `base` (where the footprint tree and

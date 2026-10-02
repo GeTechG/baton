@@ -3,6 +3,6 @@
 set -euo pipefail
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"; umask 077; mkdir -p state
 ( set -a; . ./.env; set +a; jq -n '{GH_TOKEN: env.GH_TOKEN, GIT_TERMINAL_PROMPT: "0"}' >state/agent-env.json )
-for a in $(jq -r '[.projects[].agent]|unique[]' config.json); do
+for a in $(multica/m agent list --output json | jq -r '.[].id'); do
   multica/m agent env set "$a" --custom-env-file state/agent-env.json --output json | jq -c 'keys'
 done

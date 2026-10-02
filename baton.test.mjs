@@ -1,7 +1,7 @@
 // node --test bridge.test.mjs — the bridge's pure scheduling logic (no Multica, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, assigned, snapshot, picks, byBoard } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, assigned, snapshot, picks, byBoard, team } from './baton.mjs';
 
 const P = { footprint: 'fp-id', 'blocked-by': 'bb-id' };
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id,
@@ -86,6 +86,14 @@ test('wave: orchestrator reply -> picks; unknown keys and agents, repeats and pr
   const out = 'Starting two:\n- OS-1 `worker`\nOS-2: Reviewer.\nOS-1 reviewer\nOS-3 nobody\nOS-9 worker\n';
   assert.deepEqual(picks(out, ['OS-1', 'OS-2', 'OS-3'], ['worker', 'reviewer']), [{ key: 'OS-1', agent: 'worker' }, { key: 'OS-2', agent: 'reviewer' }]);
   assert.deepEqual(picks('nothing to start', ['OS-1'], ['worker']), []);
+});
+
+test('wave: the orchestrator is found by id or name (default "orchestrator") and is not offered issues', () => {
+  const w = { id: '1', name: 'worker' }, o = { id: '2', name: 'orchestrator' }, b = { id: '3', name: 'boss' }, old = { id: '4', name: 'old', archived_at: 'x' };
+  assert.deepEqual(team([w, o, b, old]), { o, agents: [w, b] });
+  assert.deepEqual(team([w, o, b], '3'), { o: b, agents: [w, o] });
+  assert.deepEqual(team([w, o, b], 'boss'), { o: b, agents: [w, o] });
+  assert.deepEqual(team([w, old], 'old'), { o: undefined, agents: [w] });
 });
 
 test('wave: the orchestrator is asked again only when the issues changed', () => {

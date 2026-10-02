@@ -31,6 +31,9 @@ keep you from fighting the scheduler.
 - **Never assign an unassigned issue to an agent yourself.** File it unassigned; baton assigns it when it is ready.
   Handing on an issue you hold is fine: it stays in flight under its new agent.
 - Stay inside the issue's `footprint`. It is how baton keeps parallel agents off each other's files.
+- An issue is done as planned. What comes up on the way: same area, small and needing no decision — done in the same
+  issue and mentioned in the comment; same area but larger — a sub-issue (`--parent`); unrelated — a separate issue;
+  work for another project — an issue there, listed in `blocked-by` of the one that needs it. All filed unassigned.
 
 ## How an issue becomes ready
 

@@ -55,6 +55,11 @@ export function whyNot(i, flight, statusOf) {
 }
 // What the orchestrator decided on; it is asked again only when this changes (so an empty wave is not re-asked every tick).
 export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.assignee_id, i.labels, i.blockedBy, i.footprint, i.title, i.description]));
+// cfg.orchestrator is an agent id or name (default: the agent named "orchestrator"); it is never offered an issue.
+export function team(all, who = 'orchestrator') {
+  const live = all.filter((a) => !a.archived_at), o = live.find((a) => a.id === who) ?? live.find((a) => a.name === who);
+  return { o, agents: live.filter((a) => a !== o) };
+}
 // Orchestrator reply, one `KEY agent-name` per line -> [{ key, agent }]; unknown keys/agents, repeats and prose are dropped.
 export function picks(out, keys, agents) {
   const res = [];
@@ -102,9 +107,9 @@ function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the 
   return fp;
 }
 
-// One model call, no tools: the model and extra guidance come from the Multica agent cfg.orchestrator (edit them in the UI).
-function orchestrate(projects, issues, waiting, agents) {
-  const o = mj('agent', 'get', CFG.orchestrator), repo = (i) => projects[i.project_id].repo;
+// One model call, no tools: the model and extra guidance come from the orchestrator agent `o` (edit them in the UI).
+function orchestrate(projects, issues, waiting, agents, o) {
+  const repo = (i) => projects[i.project_id].repo;
   const rules = [...new Set(waiting.map((i) => projects[i.project_id]))].map((p) => `## ${p.repo}\n` +
     (try_(() => gh('api', `repos/${p.repo}/contents/AGENTS.md?ref=${p.base}`, '-H', 'Accept: application/vnd.github.raw'))?.slice(0, 8000) ?? '(no AGENTS.md)'));
   const line = (i) => `- ${i.identifier} [${repo(i)}] ${i.status}${i.assignee_id ? ', held by an agent' : ''}${i.blockedBy.length ? `, blocked-by ${i.blockedBy}` : ''}: ${i.title}`;
@@ -163,8 +168,9 @@ function tick() {
   if (!waiting.length) return;
   for (const i of waiting) i.footprint ??= estimateFootprint(projects[i.project_id], i);
   if (snapshot(issues) === lastWave || held.some((i) => mj('issue', 'runs', i.identifier, '--active').length)) return;
-  const all = mj('agent', 'list'), agents = (all.agents ?? all).filter((a) => !a.archived_at && a.id !== CFG.orchestrator);
-  const wave = picks(orchestrate(projects, issues, waiting, agents), waiting.map((i) => i.identifier), agents.map((a) => a.name));
+  const all = mj('agent', 'list'), { o, agents } = team(all.agents ?? all, CFG.orchestrator);
+  if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" (scripts/agents.sh creates it)`);
+  const wave = picks(orchestrate(projects, issues, waiting, agents, o), waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
     const i = byKey[key], id = agents.find((a) => a.name === agent).id, why = whyNot(i, held, statusOf);
     if (why) { log(null, 'wait', key, why); continue; }
