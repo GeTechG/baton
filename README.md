@@ -51,8 +51,9 @@ Nothing project-specific lives in this repo: `config.json`, `.env` and `local/` 
 ## Agent skill
 `skills/baton/SKILL.md` tells any coding agent (Claude Code, Codex, opencode, …) that a repo is run by baton + Multica
 and what not to do by hand. Install: `npx skills add GeTechG/baton` (add `-g` for all your projects).
-A Multica run starts one directory above the checkout, so the agent gets the repo's skills only after it opens a file of
-the repo with its file tool (not through the shell); the `worker` instructions make it read `AGENTS.md` that way.
+A Multica run starts one directory above the checkout, which the agent clones later, so the session does not load the
+skills the repo ships. `worker` therefore runs with a Claude Code hook (`custom_args` in `agents/worker.json`) that,
+after every shell command, links each `<checkout>/.claude/skills/*` into the run's own `.claude/skills/`.
 
 ## Tests
 - `node watch.mjs` — live view of what every in-flight agent is doing (run it in a spare terminal pane).

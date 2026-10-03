@@ -10,8 +10,8 @@ for f in agents/*.json; do
     rt=$(jq -r --arg p "$p" '[.[]|select(.provider==$p)][0].id // empty' <<<"$rts")
     [ -n "$rt" ] || { echo "$n: no $p runtime (is the daemon running?)" >&2; exit 1; }
     multica/m agent create --name "$n" --runtime-id "$rt" --model "$(jq -r .model "$f")" \
-      --max-concurrent-tasks "$(jq -r .max_concurrent_tasks "$f")" --description "$(jq -r .description "$f")" \
-      --instructions "$(jq -r .instructions "$f")" --output json | jq -r '"created \(.name) \(.id)"'
+      --max-concurrent-tasks "$(jq -r .max_concurrent_tasks "$f")" --custom-args "$(jq -c '.custom_args // []' "$f")" \
+      --description "$(jq -r .description "$f")" --instructions "$(jq -r .instructions "$f")" --output json | jq -r '"created \(.name) \(.id)"'
   fi
 done
 exec scripts/agent-env.sh
