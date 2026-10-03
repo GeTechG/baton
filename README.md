@@ -10,7 +10,7 @@ in Multica) and the repo's own `AGENTS.md`.
   their descriptions and footprints,
   the other open and recently closed issues, every agent's name and description, and each project's `AGENTS.md`. It
   answers which issues start now and which agent takes each; baton assigns them and stays out of the way until every
-  run has ended. It is asked again only when something about the issues changed.
+  run has ended. It is asked again only when something about the issues changed. When it starts nothing, its one-line reason goes to `bridge.log`.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open `blocked-by` issues (cross-project
   keys work), the `needs-human` label, and a `footprint` (Haiku-estimated if missing) that overlaps an issue an agent holds.
 - **Orchestrator:** a Multica agent (the one named `orchestrator`; `orchestrator` in `config.json` names another, by id or name) that is never assigned an issue: baton reads its

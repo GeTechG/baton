@@ -70,6 +70,8 @@ export function picks(out, keys, agents) {
   }
   return res;
 }
+// Why a wave came out empty, for the log: the orchestrator's reply on one line, capped.
+export const reason = (out) => out.replace(/\s+/g, ' ').trim().slice(0, 300) || 'empty reply';
 // The path list for the footprint prompt: every file while the repo is small, otherwise its directories cut to the
 // deepest level that still fits the budget (so every top-level area stays visible rather than an alphabetical prefix).
 export function repoMap(paths, budget = 40000) {
@@ -123,7 +125,7 @@ function orchestrate(projects, issues, waiting, agents, o) {
     `# Other open tasks\n${issues.filter((i) => !CLOSED.includes(i.status) && !waiting.includes(i)).map(line).join('\n') || '-'}\n\n` +
     `# Recently closed\n${issues.filter((i) => CLOSED.includes(i.status)).sort((a, b) => a.updated_at.localeCompare(b.updated_at)).slice(-15).map(line).join('\n') || '-'}\n\n` +
     (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
-    'Reply with ONLY one line per task to start: `<KEY> <agent name>`. No other text.';
+    'Reply with ONLY one line per task to start: `<KEY> <agent name>`. No other text. If you start nothing, reply with one line saying why.';
   return execFileSync('claude', ['-p', '--model', o.model || 'sonnet', '--max-turns', '1'], { input: prompt, encoding: 'utf8' });
 }
 
@@ -170,7 +172,7 @@ function tick() {
   if (snapshot(issues) === lastWave || held.some((i) => mj('issue', 'runs', i.identifier, '--active').length)) return;
   const all = mj('agent', 'list'), { o, agents } = team(all.agents ?? all, CFG.orchestrator);
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" (scripts/agents.sh creates it)`);
-  const wave = picks(orchestrate(projects, issues, waiting, agents, o), waiting.map((i) => i.identifier), agents.map((a) => a.name));
+  const out = orchestrate(projects, issues, waiting, agents, o), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
     const i = byKey[key], id = agents.find((a) => a.name === agent).id, why = whyNot(i, held, statusOf);
     if (why) { log(null, 'wait', key, why); continue; }
@@ -180,7 +182,7 @@ function tick() {
     i.assignee_type = 'agent'; i.assignee_id = id; held.push(i);
     log(null, 'assign', key, projects[i.project_id].repo, '->', agent, `footprint=${i.footprint.join(',')}`);
   }
-  log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : 'nothing to start', `of ${waiting.map((i) => i.identifier)}`);
+  log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : `nothing to start (${reason(out)})`, `of ${waiting.map((i) => i.identifier)}`);
   lastWave = snapshot(issues);
 }
 
