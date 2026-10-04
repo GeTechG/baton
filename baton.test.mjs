@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, team, picks, reason, byBoard, busy, prompt, exports_ } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, team, picks, reason, byBoard } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -36,18 +36,6 @@ test('run decision: leave a live agent alone, park a waiting issue, restart a qu
 test('agent env: AGENT_X becomes X and overrides, baton-only values stay out of reach of the rename', () => {
   assert.deepEqual(agentEnv({ HOME: '/h', LIFIC_API_KEY: 'baton', AGENT_LIFIC_API_KEY: 'bot', AGENT_GH_TOKEN: 't' }, { LIFIC_URL: 'u' }),
     { HOME: '/h', LIFIC_API_KEY: 'bot', GH_TOKEN: 't', LIFIC_URL: 'u' });
-});
-
-test('herdr mode: a working or blocked agent is a live run, the prompt tells it nobody will answer, env file is quoted', () => {
-  assert.deepEqual(['working', 'blocked', 'idle', 'done', 'unknown', null].map(busy), [true, true, false, false, false, false]);
-  const a = { instructions: 'Do it.' }, i = { identifier: 'LIB-1' }, p = { repo: 'o/r', base: 'main' };
-  assert.equal(prompt(a, i, p, true, false), 'Do it.\n\nYour issue: LIB-1. Repo o/r, base branch `main`.');
-  assert.equal(prompt(a, i, p, false, false), 'Continue issue LIB-1: read its new comments and its labels first.');
-  for (const first of [true, false]) {
-    const w = prompt(a, i, p, first, true);
-    assert.ok(w.startsWith(prompt(a, i, p, first, false)) && /unattended/.test(w) && /never ask a question/.test(w));
-  }
-  assert.equal(exports_({ GH_TOKEN: "a'b", LIFIC_URL: 'http://x' }), "export GH_TOKEN='a'\\''b'\nexport LIFIC_URL='http://x'\n");
 });
 
 test('overlaps: path prefix, directory, disjoint, empty is conservative', () => {
@@ -103,9 +91,17 @@ test('watch: one line per tool call, quiet on clean results, loud on failures', 
   assert.deepEqual(lines('K-1', JSON.stringify({ type: 'system', subtype: 'init' }), ''), []);
 });
 
-test('watch: a transcript line whose content is a string (typed to an interactive agent) shows nothing', async () => {
-  const { say } = await import('./watch.mjs');
-  assert.deepEqual(say(JSON.stringify({ type: 'user', message: { role: 'user', content: 'Continue issue LIB-1' } })), []);
+test('watch: detailed view shows the skill, the command, the head of a result, full text and the outcome', async () => {
+  const { detail, say } = await import('./watch.mjs');
+  const ev = (type, content, extra = {}) => JSON.stringify({ type, message: { content }, ...extra });
+  assert.deepEqual(detail(ev('assistant', [{ type: 'tool_use', name: 'Skill', input: { skill: 'herdr', args: 'x' } }])), ['', '● Skill(herdr)']);
+  assert.deepEqual(detail(ev('assistant', [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test\nls', description: 'Run tests' } }])), ['', '● Bash(npm test', '    ls)']);
+  assert.deepEqual(detail(ev('user', [{ type: 'tool_result', content: [{ type: 'text', text: '1\n2\n3\n4\n5\n6' }] }])), ['  ⎿ 1', '    2', '    3', '    4', '    … +2 lines']);
+  assert.deepEqual(detail(ev('user', [{ type: 'tool_result', content: '' }])), ['  ⎿ (no output)']);
+  assert.deepEqual(detail(ev('assistant', [{ type: 'text', text: 'Done.\nNext.' }], { parent_tool_use_id: 't1' })), ['', '  ● Done.', '    Next.']);
+  assert.deepEqual(detail(JSON.stringify({ type: 'result', subtype: 'success', num_turns: 12, duration_ms: 180000, total_cost_usd: 1.234 })), ['', '◆ success: 12 turns, 3 min, $1.23']);
+  assert.deepEqual(detail('not json'), ['not json']);
+  assert.deepEqual([detail(''), detail(ev('user', 'typed text')), say(ev('user', 'typed text'))], [[], [], []]);
 });
 
 test('run log: complete new lines only, readable form, nothing for noise', () => {
