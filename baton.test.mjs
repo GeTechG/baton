@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, team, picks, reason, byBoard } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, said, team, picks, reason, byBoard } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -153,6 +153,16 @@ test('wave: the orchestrator is asked again only when the issues changed', () =>
   assert.equal(snapshot([a]), snapshot([issue('OS-1', { fp: 'src/a.js' })]));
   assert.notEqual(snapshot([a]), snapshot([{ ...a, status: 'done' }]));
   assert.notEqual(snapshot([a]), snapshot([{ ...a, agent: 'reviewer' }]));
+  assert.notEqual(snapshot([a]), snapshot([{ ...a, said: ['sergey: follow upstream'] }]));
+});
+
+test('wave: the orchestrator sees what people commented, not the agents, latest last', () => {
+  const c = (author, content, created_at) => ({ author, content, created_at });
+  const cs = [c('sergey', 'second\n\nline', '2026-01-02'), c('agent', 'PR opened', '2026-01-03'), c('sergey', 'first', '2026-01-01')];
+  assert.deepEqual(said(cs, 'agent'), ['sergey: first', 'sergey: second line']);
+  assert.deepEqual(said(cs, 'agent', 1), ['sergey: second line']);
+  assert.equal(said([c('sergey', 'x'.repeat(900), '2026-01-01')], 'agent')[0].length, 'sergey: '.length + 600);
+  assert.deepEqual(said([], 'agent'), []);
 });
 
 test('wave order: manual board order first, issue number on ties', () => {

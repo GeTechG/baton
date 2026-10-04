@@ -89,7 +89,11 @@ export function whyNot(i, flight, statusOf) {
   return clash ? `footprint overlaps ${clash.identifier}` : null;
 }
 // What the orchestrator decided on; it is asked again only when this changes (so an empty wave is not re-asked every tick).
-export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.footprint, i.title, i.description]));
+export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.footprint, i.title, i.description, i.said]));
+// What people wrote on a waiting issue, for the orchestrator (a decision is often given in a comment, not in the
+// description): the last `n` comments not by the agents' tracker user, oldest first, one capped line each.
+export const said = (comments, bot = CFG.agent.user, n = 5) => comments.filter((c) => c.author !== bot)
+  .sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(-n).map((c) => `${c.author}: ${c.content.replace(/\s+/g, ' ').trim().slice(0, 600)}`);
 // The agents (agents/*.json, then cfg.agents: a later file with the same name wins) -> the orchestrator, named
 // cfg.orchestrator (default "orchestrator") and never given an issue, and the rest.
 export function team(all, who = 'orchestrator') {
@@ -229,7 +233,8 @@ function orchestrate(projects, issues, waiting, agents, o, runs) {
     `# Agents\n${agents.map((a) => `- ${a.name}: ${a.description || '(no description)'}`).join('\n')}\n\n` +
     `# Project rules\n${rules.join('\n\n')}\n\n` +
     `# WAITING (the human's order: top = do first)\n${waiting.map((i) => `## ${i.identifier} [${repo(i)}] ${i.title}\nstatus: ${runs[i.identifier] ? `started earlier by ${runs[i.identifier].agent}, parked` : 'todo (not started)'}; labels: ${i.labels.join(', ') || '-'}; ` +
-      `footprint: ${i.footprint.join(', ') || '-'}\n${i.description ?? ''}`).join('\n\n')}\n\n` +
+      `footprint: ${i.footprint.join(', ') || '-'}\n${i.description ?? ''}` +
+      (i.said?.length ? `\nComments from people since (latest last; they may settle what the description leaves open):\n${i.said.map((c) => `- ${c}`).join('\n')}` : '')).join('\n\n')}\n\n` +
     `# Other open tasks\n${issues.filter((i) => !waiting.includes(i)).map(line).join('\n') || '-'}\n\n` +
     `# Recently closed\n${closed.map(line).join('\n') || '-'}\n\n` +
     (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
@@ -297,7 +302,7 @@ function tick() {
   const free = issues.filter((x) => x.status === 'todo' && !whyNot(x, [], statusOf));
   const waiting = [...free.filter((x) => runs[x.identifier]), ...free.filter((x) => !runs[x.identifier]).slice(0, CFG.maxWave)];
   if (!waiting.length) return;
-  for (const i of waiting) i.footprint ??= estimateFootprint(projects[i.project_id], i);
+  for (const i of waiting) { i.footprint ??= estimateFootprint(projects[i.project_id], i); i.said = said(tj('comment', 'list', i.identifier)); }
   if (snapshot(issues) === lastWave || issues.some((x) => x.status === 'in_progress')) return;
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" in agents/`);
   const out = orchestrate(projects, issues, waiting, agents, o, runs), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));

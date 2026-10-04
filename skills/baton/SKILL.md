@@ -41,7 +41,7 @@ fighting the scheduler.
 ## How an issue becomes ready
 
 baton works in waves. While any agent run is active it starts nothing. Once all runs have ended, its orchestrator (one
-model call) reads the waiting issues, the agents' descriptions and each repo's `AGENTS.md`, and picks which issues start
+model call) reads the waiting issues with people's latest comments on them, the agents' descriptions and each repo's `AGENTS.md`, and picks which issues start
 now and which agent takes each. An issue can be picked only when all of these hold:
 
 - its status is `todo` (`backlog` = not ready, a human moves it; `in_review` waits for a review, not an agent),
