@@ -32,6 +32,12 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 - **Hand-offs:** the issue's `agent` property names the agent that holds it. baton sets it when it starts the issue;
   an agent passes the issue on with `lific issue update <KEY> --set agent=<name>` when the repo's rules say so, and the
   next run is that agent's (a new session in the same worktree).
+- **Herdr mode** (`"herdr": true` in `config.json`): a run is an interactive Claude Code in a tab of a
+  [Herdr](https://herdr.dev) workspace instead of a headless process, so you can watch every agent work and type into
+  its pane. The agent is told that it runs unattended and that nobody will answer (and has no `AskUserQuestion` tool):
+  it works as it does headless, and what you do write to it is an instruction. A run is over when Herdr sees the agent
+  stop working (idle); `blocked` on a dialog counts as still running and waits for you. The tab stays open after the
+  run; the next run of the issue replaces it with a new tab that resumes the session, and closing the issue closes it.
 - **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both and removes the label; unpushed work in the old worktree is lost).
 
 ## Run
@@ -50,7 +56,8 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
      }
    }
    ```
-   Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`.
+   Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`,
+   `herdr` (`true`, or `{ "workspace": "baton", "args": [...] }`: the workspace label and the `claude` arguments of a run).
 4. `scripts/up.sh` (or, with `.env` exported, `npm start` / `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
 `scripts/`: `up.sh` (starts the tracker if it is down, then the baton loop, idempotent), `down.sh` (`--all` also kills the agent
@@ -78,6 +85,12 @@ checkout of the repo — issue worktrees are made from it; without it baton keep
 An agent run is `agent.cmd` in `config.json` (default: Claude Code, headless, stream-json into `state/logs/<KEY>.log`)
 plus `--model <the agent's model>`, `--session-id <uuid>` on the agent's first run on the issue or `--resume <uuid>`
 after that, then the prompt: the agent's `instructions` and the issue key, repo and base branch.
+In Herdr mode `agent.cmd` is not used: baton opens a tab labelled with the issue key in the workspace labelled `baton`
+of the default Herdr session (which must be running; the workspace is created when missing), sources `state/agent.env`
+(the `AGENT_X` values, mode 600) in its shell, starts `claude` there under the agent name `<key in lower case>` and sends
+the prompt. `state/logs/<KEY>.log` is then a link to the session's Claude Code transcript, so the tracker's run log,
+`watch.mjs`, `status.sh` and `down.sh --all` work as for a headless run (a killed agent leaves its tab with a shell). Trust the worktrees directory in Claude Code once, or the first run of an issue
+stops at the trust dialog.
 Nothing project-specific lives in this repo: `config.json`, `.env` and `local/` are gitignored.
 
 ## Agent skill

@@ -15,7 +15,8 @@ const text = (x) => (Array.isArray(x) ? x.map((b) => b.text ?? '').join(' ') : x
 // [{ kind: 'tool' | 'error' | 'text', tool?, text }] — a tool call, a failed tool result, something the agent said.
 export function say(raw) {
   let ev; try { ev = JSON.parse(raw); } catch { return one(raw) ? [{ kind: 'text', text: one(raw, 300) }] : []; }
-  return (ev.message?.content ?? []).flatMap((b) => {
+  const content = ev.message?.content; // a string (what was typed to an interactive agent) is not shown
+  return (Array.isArray(content) ? content : []).flatMap((b) => {
     const i = b.input ?? {};
     if (b.type === 'tool_use') return [{ kind: 'tool', tool: b.name ?? 'tool', text: one(i.description ?? i.command ?? i.file_path ?? i.pattern ?? i.prompt ?? JSON.stringify(i)) }];
     if (b.type === 'tool_result') return b.is_error ? [{ kind: 'error', text: one(text(b.content), 140) }] : [];

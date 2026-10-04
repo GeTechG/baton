@@ -9,9 +9,12 @@
 // `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
 // ponytail: prefix-match footprints, 100 open issues per project and status, one `issue get` per open issue per tick,
 // a run is "alive" while its pid exists (a reboot can recycle it), agents and the orchestrator run on the claude CLI only.
+// cfg.herdr: runs are interactive agents in Herdr tabs instead (watchable, a human may type into them); a run is alive
+// while Herdr reports its agent working or blocked.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { plain, say } from './watch.mjs';
@@ -41,6 +44,7 @@ const comment = (key, text) => t('comment', 'add', key, `--content=${text}`);
 // A label edit is read-modify-write inside the CLI and loses to any concurrent write on the issue (a comment is enough): once more.
 const relabel = (key, flag, label) => { const go = () => t('issue', 'update', key, `--${flag}-label=${label}`); return try_(go) ?? go(); };
 const gh = (...a) => run('gh', a);
+const H = (...a) => JSON.parse(run('herdr', a)).result; // cfg.herdr: the Herdr session baton's panes live in
 const try_ = (f) => { try { return f(); } catch { return null; } };
 
 // ---- pure logic (tested in baton.test.mjs) ----
@@ -74,6 +78,17 @@ export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why
 // GitHub token live in .env under that prefix, so baton itself never runs with them), plus `extra`.
 export const agentEnv = (env, extra = {}) => ({ ...Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('AGENT_'))),
   ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('AGENT_')).map(([k, v]) => [k.slice(6), v])), ...extra });
+// cfg.herdr: what Herdr says about the agent in the issue's tab -> is its run still going. `blocked` (a dialog only a
+// human can answer) counts: restarting would not unblock it. Anything else (idle, done, unknown, no such agent) = ended.
+export const busy = (status) => ['working', 'blocked'].includes(status);
+// What a run is told. watched = it runs in a terminal a human can see and type into (cfg.herdr), which must not change
+// how it works: nobody is expected to answer.
+export const prompt = (a, i, p, first, watched) => (first ? `${a.instructions}\n\nYour issue: ${i.identifier}. Repo ${p.repo}, base branch \`${p.base}\`.`
+  : `Continue issue ${i.identifier}: read its new comments and its labels first.`) + (!watched ? '' : '\n\nYou run unattended. A human may watch this ' +
+  'terminal, but nobody is expected to answer: never ask a question here or wait for a reply or a confirmation, decide and go on exactly as you ' +
+  'would with no terminal at all (what needs a human goes to the issue, as your instructions say). If a human does write to you here, it is the maintainer: do what they say.');
+// Shell `export` lines for a file the agent's pane sources (values single-quoted).
+export const exports_ = (env) => Object.entries(env).map(([k, v]) => `export ${k}='${String(v).replace(/'/g, `'\\''`)}'\n`).join('');
 // Who runs the issue next: the agent its `agent` property names, else the one that ran it last, else the base worker
 // (an issue a human set `active` by hand).
 export const holder = (i, r, dflt = 'worker') => i.agent ?? r?.agent ?? dflt;
@@ -124,7 +139,7 @@ export function repoMap(paths, budget = 40000) {
 const RUNS = `${DIR}/runs.json`;
 const loadRuns = () => try_(() => JSON.parse(readFileSync(RUNS, 'utf8'))) ?? {};
 const saveRuns = (runs) => writeFileSync(RUNS, JSON.stringify(runs));
-const alive = (r) => !!r?.pid && try_(() => process.kill(r.pid, 0)) === true;
+const alive = (r, key) => (CFG.herdr ? busy(try_(() => H('agent', 'get', key.toLowerCase()).agent.agent_status)) : !!r?.pid && try_(() => process.kill(r.pid, 0)) === true);
 function loadAgents() {
   const dirs = [resolve(ROOT, 'agents'), resolve(ROOT, CFG.agents ?? 'local/agents')].filter(existsSync);
   const all = dirs.flatMap((d) => readdirSync(d).filter((f) => f.endsWith('.json')).sort().map((f) => JSON.parse(readFileSync(`${d}/${f}`, 'utf8'))));
@@ -147,29 +162,59 @@ function worktree(p, key) { // detached at origin/<base>; the agent creates or c
 }
 function forget(p, key, runs) { // the issue's worktree and session are gone; pushed work stays on its branch
   const wt = runs[key]?.wt;
+  if (runs[key]?.tab) try_(() => H('tab', 'close', runs[key].tab));
   if (wt) { try_(() => run('git', ['-C', source(p), 'worktree', 'remove', '--force', wt])); rmSync(wt, { recursive: true, force: true }); }
   delete runs[key]; saveRuns(runs);
+}
+// cfg.herdr: the run is an interactive agent in its own tab (label = the issue key, agent name = the key in lower case)
+// of the workspace labelled cfg.herdr.workspace. Every run gets a new tab; the session is resumed, so its history is there.
+function pane(key, r, runs, sess, text) {
+  const name = key.toLowerCase(), label = CFG.herdr.workspace ?? 'baton';
+  if (r.tab) try_(() => H('tab', 'close', r.tab));
+  const ws = (H('workspace', 'list').workspaces.find((w) => w.label === label) ?? H('workspace', 'create', '--label', label, '--no-focus').workspace).workspace_id;
+  const made = H('tab', 'create', '--workspace', ws, '--cwd', r.wt, '--label', key, '--no-focus');
+  r.tab = made.tab.tab_id; saveRuns(runs); // persist right away: the next run closes this tab even if the launch below fails
+  H('pane', 'run', made.root_pane.pane_id, `. '${DIR}/agent.env'`);
+  H('agent', 'start', name, '--kind', 'claude', '--pane', made.root_pane.pane_id, '--', ...(CFG.herdr.args ?? ['--permission-mode', 'auto', '--disallowedTools', 'AskUserQuestion']), ...sess);
+  r.pid = H('pane', 'process-info', '--pane', made.root_pane.pane_id).process_info.foreground_process_group_id; // for status.sh and down.sh --all
+  H('agent', 'prompt', name, text);
+  try_(() => H('agent', 'wait', name, '--until', 'working', '--timeout', '15000')); // or the next tick sees it idle and starts it again
 }
 function start(p, i, runs, a) {
   const r = runs[i.identifier] ??= { n: 0 }, first = r.agent !== a.name; // another agent on the issue = a new session in the same worktree
   if (first) Object.assign(r, { agent: a.name, session: randomUUID(), n: 0 });
   r.wt ??= worktree(p, i.identifier);
-  const prompt = first ? `${a.instructions}\n\nYour issue: ${i.identifier}. Repo ${p.repo}, base branch \`${p.base}\`.`
-    : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
-  mkdirSync(`${DIR}/logs`, { recursive: true });
-  const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
-  r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
-  const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
-    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: `${DIR}/bin:${process.env.PATH}` }) });
-  child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
-  child.unref(); r.pid = child.pid; r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off, review or park; total names the run
+  const text = prompt(a, i, p, first, !!CFG.herdr), sess = [...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session];
+  if (CFG.herdr) {
+    r.pid = null; // a failed launch still counts as a run, so a broken setup ends in needs-human rather than a retry every tick
+    try { pane(i.identifier, r, runs, sess, text); } catch (e) { log(null, 'run failed', i.identifier, e.message.split('\n')[0]); }
+  } else {
+    mkdirSync(`${DIR}/logs`, { recursive: true });
+    const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
+    r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
+    const child = spawn(bin, [...args, ...sess, text], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
+      env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: `${DIR}/bin:${process.env.PATH}` }) });
+    child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
+    child.unref(); r.pid = child.pid;
+  }
+  r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off, review or park; total names the run
   saveRuns(runs); // persist right away: a later throw in this tick must not orphan the process
-  log(null, 'run', i.identifier, `#${r.total}`, a.name, first ? 'new session' : 'resumed', `pid ${r.pid}`, r.wt);
+  log(null, 'run', i.identifier, `#${r.total}`, a.name, first ? 'new session' : 'resumed', CFG.herdr ? `tab ${r.tab}` : `pid ${r.pid}`, r.wt);
+}
+// cfg.herdr: an interactive run writes no log of its own, so the Claude Code transcript of its session (the same message
+// format) stands in as state/logs/<KEY>.log: the run log and watch.mjs read it like a headless run's.
+function transcript(key, r, runs) {
+  const root = `${process.env.CLAUDE_CONFIG_DIR ?? `${homedir()}/.claude`}/projects`, link = `${DIR}/logs/${key}.log`;
+  const f = try_(() => readdirSync(root).map((d) => `${root}/${d}/${r.session}.jsonl`).find(existsSync));
+  if (!f || f === r.log) return;
+  mkdirSync(`${DIR}/logs`, { recursive: true }); rmSync(link, { force: true }); symlinkSync(f, link);
+  r.log = f; r.pos = 0; saveRuns(runs);
 }
 // The tracker's run log of an issue = the readable part of its agent log, forwarded once per tick.
 function forward(runs) {
   for (const [key, r] of Object.entries(runs)) {
     const f = `${DIR}/logs/${key}.log`;
+    if (CFG.herdr) transcript(key, r, runs);
     if (!existsSync(f) || statSync(f).size <= (r.pos ?? 0)) continue;
     const { pos, out } = tail(readFileSync(f), r.pos ?? 0), [bin, args] = LIFIC();
     if (out.length && try_(() => execFileSync(bin, [...args, 'issue', 'log', 'add', key, `--source=run ${r.total}`], { input: out.join('\n'), stdio: ['pipe', 'pipe', 'pipe'] })) == null) continue;
@@ -231,7 +276,7 @@ function tick() {
   // A closed issue gives its worktree and session back.
   for (const key of Object.keys(runs)) {
     const i = try_(() => (statusOf(key), byKey[key]));
-    if (i && CLOSED.includes(i.status) && !alive(runs[key])) { forget(projects[i.project_id], key, runs); log(null, 'cleanup', key); }
+    if (i && CLOSED.includes(i.status) && !alive(runs[key], key)) { forget(projects[i.project_id], key, runs); log(null, 'cleanup', key); }
   }
 
   // Tell the human once per needs-human episode (state/notified.json, so restarts don't re-ping).
@@ -246,7 +291,7 @@ function tick() {
 
   const flying = (i) => ['in_progress', 'in_review'].includes(i.status);
   for (const i of issues.filter((x) => flying(x) && x.labels.includes(CFG.freshLabel))) {
-    const step = freshStep(i, true, alive(runs[i.identifier]) ? 1 : 0);
+    const step = freshStep(i, true, alive(runs[i.identifier], i.identifier) ? 1 : 0);
     if (step === 'rerun') restartFresh(projects[i.project_id], i, runs); else log(`f${i.identifier}`, 'fresh', i.identifier, 'waits for the active run to end');
   }
 
@@ -256,7 +301,7 @@ function tick() {
   for (const i of issues.filter((x) => x.status === 'in_review' && runs[x.identifier]?.n)) { runs[i.identifier].n = 0; saveRuns(runs); }
   for (const i of issues.filter((x) => x.status === 'in_progress')) {
     const r = runs[i.identifier], name = holder(i, r), a = agents.find((x) => x.name === name);
-    const why = whyNot(i, [], statusOf) ?? (a ? null : `no agent "${name}"`), step = runStep(alive(r), why, r?.agent === name ? r.n : 0);
+    const why = whyNot(i, [], statusOf) ?? (a ? null : `no agent "${name}"`), step = runStep(alive(r, i.identifier), why, r?.agent === name ? r.n : 0);
     if (step === 'park') {
       if (!a) { comment(i.identifier, `Bridge: this issue names the agent "${name}", which does not exist. Agents: ${agents.map((x) => x.name).join(', ')}.`); relabel(i.identifier, 'add', CFG.humanLabel); }
       t('issue', 'update', i.identifier, '--status=todo', '--unassign'); i.status = 'todo';
@@ -297,6 +342,9 @@ function tick() {
 function agentBin() {
   mkdirSync(`${DIR}/bin`, { recursive: true });
   writeFileSync(`${DIR}/bin/lific`, `#!/bin/sh\nexec "${CFG.lific.bin}" --backend http "$@"\n`); chmodSync(`${DIR}/bin/lific`, 0o755);
+  // cfg.herdr: a pane is a shell of the Herdr server, not baton's child, so it sources what an agent process would inherit.
+  const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('AGENT_')));
+  writeFileSync(`${DIR}/agent.env`, `${exports_(agentEnv(own, { LIFIC_URL: CFG.lific.url }))}export PATH='${DIR}/bin':"$PATH"\n`, { mode: 0o600 }); chmodSync(`${DIR}/agent.env`, 0o600);
 }
 const loop = async () => {
   for (; ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {
