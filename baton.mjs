@@ -44,7 +44,7 @@ const comment = (key, text) => t('comment', 'add', key, `--content=${text}`);
 // A label edit is read-modify-write inside the CLI and loses to any concurrent write on the issue (a comment is enough): once more.
 const relabel = (key, flag, label) => { const go = () => t('issue', 'update', key, `--${flag}-label=${label}`); return try_(go) ?? go(); };
 const gh = (...a) => run('gh', a);
-const H = (...a) => JSON.parse(run('herdr', a)).result; // cfg.herdr: the Herdr session baton's panes live in
+const H = (...a) => JSON.parse(run('herdr', a) || '{}').result; // cfg.herdr: the Herdr session baton's panes live in; some commands (pane run) print nothing
 const try_ = (f) => { try { return f(); } catch { return null; } };
 
 // ---- pure logic (tested in baton.test.mjs) ----
@@ -181,8 +181,11 @@ function pane(key, r, runs, sess, text) {
   try_(() => H('agent', 'wait', name, '--until', 'working', '--timeout', '15000')); // or the next tick sees it idle and starts it again
 }
 function start(p, i, runs, a) {
-  const r = runs[i.identifier] ??= { n: 0 }, first = r.agent !== a.name; // another agent on the issue = a new session in the same worktree
-  if (first) Object.assign(r, { agent: a.name, session: randomUUID(), n: 0 });
+  // Another agent on the issue = a new session in the same worktree; so is, in Herdr mode, a session whose launch failed
+  // before it existed (nothing to resume).
+  const r = runs[i.identifier] ??= { n: 0 }, handed = r.agent !== a.name, first = handed || (!!CFG.herdr && !sessionFile(r));
+  if (handed) Object.assign(r, { agent: a.name, n: 0 });
+  if (first) r.session = randomUUID();
   r.wt ??= worktree(p, i.identifier);
   const text = prompt(a, i, p, first, !!CFG.herdr), sess = [...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session];
   if (CFG.herdr) {
@@ -203,9 +206,11 @@ function start(p, i, runs, a) {
 }
 // cfg.herdr: an interactive run writes no log of its own, so the Claude Code transcript of its session (the same message
 // format) stands in as state/logs/<KEY>.log: the run log and watch.mjs read it like a headless run's.
+function sessionFile(r, root = `${process.env.CLAUDE_CONFIG_DIR ?? `${homedir()}/.claude`}/projects`) {
+  return try_(() => readdirSync(root).map((d) => `${root}/${d}/${r.session}.jsonl`).find(existsSync));
+}
 function transcript(key, r, runs) {
-  const root = `${process.env.CLAUDE_CONFIG_DIR ?? `${homedir()}/.claude`}/projects`, link = `${DIR}/logs/${key}.log`;
-  const f = try_(() => readdirSync(root).map((d) => `${root}/${d}/${r.session}.jsonl`).find(existsSync));
+  const f = sessionFile(r), link = `${DIR}/logs/${key}.log`;
   if (!f || f === r.log) return;
   mkdirSync(`${DIR}/logs`, { recursive: true }); rmSync(link, { force: true }); symlinkSync(f, link);
   r.log = f; r.pos = 0; saveRuns(runs);
