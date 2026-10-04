@@ -100,6 +100,7 @@ test('watch: detailed view shows the skill, the command, the head of a result, f
   assert.deepEqual(detail(ev('user', [{ type: 'tool_result', content: '' }])), ['  ⎿ (no output)']);
   assert.deepEqual(detail(ev('assistant', [{ type: 'text', text: 'Done.\nNext.' }], { parent_tool_use_id: 't1' })), ['', '  ● Done.', '    Next.']);
   assert.deepEqual(detail(JSON.stringify({ type: 'result', subtype: 'success', num_turns: 12, duration_ms: 180000, total_cost_usd: 1.234 })), ['', '◆ success: 12 turns, 3 min, $1.23']);
+  assert.deepEqual(detail(ev('user', [{ type: 'text', text: 'Base directory\n# Skill\nbody' }])), ['  Base directory', '  # Skill', '  … +1 lines']);
   assert.deepEqual(detail('not json'), ['not json']);
   assert.deepEqual([detail(''), detail(ev('user', 'typed text')), say(ev('user', 'typed text'))], [[], [], []]);
 });

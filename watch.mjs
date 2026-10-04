@@ -40,6 +40,7 @@ export function detail(raw, c = (n, s) => s) {
   if (ev.type === 'result') return ['', c(ev.is_error ? 31 : 32, `◆ ${ev.subtype}: ${ev.num_turns} turns, ${Math.round(ev.duration_ms / 60000)} min, $${ev.total_cost_usd?.toFixed(2)}`)];
   const content = ev.message?.content, sub = ev.parent_tool_use_id ? '  ' : ''; // a subagent's lines are indented
   return (Array.isArray(content) ? content : []).flatMap((b) => {
+    if (b.type === 'text' && ev.type !== 'assistant') return head(b.text.trim(), 2).map((l) => c(2, `${sub}  ${l}`)); // text given to the agent (a loaded skill): its head
     if (b.type === 'text' && b.text?.trim()) return ['', ...b.text.trim().split('\n').map((l, n) => `${sub}${n ? '  ' : `${c(1, '●')} `}${l}`)];
     if (b.type === 'thinking' && b.thinking?.trim()) return [c(2, `${sub}∴ ${one(b.thinking, 300)}`)];
     if (b.type === 'tool_use') return ['', ...head(arg(b.name, b.input ?? {}), 6).map((l, n, all) => `${sub}${n ? '    ' : `${c(33, '●')} ${c(1, b.name)}(`}${l}${n === all.length - 1 ? ')' : ''}`)];
