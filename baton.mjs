@@ -169,7 +169,7 @@ function forget(p, key, runs) { // the issue's worktree and session are gone; pu
 // cfg.herdr: the run is an interactive agent in its own tab (label = the issue key, agent name = the key in lower case)
 // of the workspace labelled cfg.herdr.workspace. Every run gets a new tab; the session is resumed, so its history is there.
 function pane(key, r, runs, sess, text) {
-  const name = key.toLowerCase(), label = CFG.herdr.workspace ?? 'baton';
+  const name = key.toLowerCase(), label = CFG.herdr.workspace ?? 'baton-agents';
   if (r.tab) try_(() => H('tab', 'close', r.tab));
   const ws = (H('workspace', 'list').workspaces.find((w) => w.label === label) ?? H('workspace', 'create', '--label', label, '--no-focus').workspace).workspace_id;
   const made = H('tab', 'create', '--workspace', ws, '--cwd', r.wt, '--label', key, '--no-focus');

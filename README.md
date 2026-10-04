@@ -57,7 +57,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
    }
    ```
    Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`,
-   `herdr` (`true`, or `{ "workspace": "baton", "args": [...] }`: the workspace label and the `claude` arguments of a run).
+   `herdr` (`true`, or `{ "workspace": "baton-agents", "args": [...] }`: the workspace label and the `claude` arguments of a run).
 4. `scripts/up.sh` (or, with `.env` exported, `npm start` / `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
 `scripts/`: `up.sh` (starts the tracker if it is down, then the baton loop, idempotent), `down.sh` (`--all` also kills the agent
@@ -85,7 +85,7 @@ checkout of the repo — issue worktrees are made from it; without it baton keep
 An agent run is `agent.cmd` in `config.json` (default: Claude Code, headless, stream-json into `state/logs/<KEY>.log`)
 plus `--model <the agent's model>`, `--session-id <uuid>` on the agent's first run on the issue or `--resume <uuid>`
 after that, then the prompt: the agent's `instructions` and the issue key, repo and base branch.
-In Herdr mode `agent.cmd` is not used: baton opens a tab labelled with the issue key in the workspace labelled `baton`
+In Herdr mode `agent.cmd` is not used: baton opens a tab labelled with the issue key in the workspace labelled `baton-agents`
 of the default Herdr session (which must be running; the workspace is created when missing), sources `state/agent.env`
 (the `AGENT_X` values, mode 600) in its shell, starts `claude` there under the agent name `<key in lower case>` and sends
 the prompt. `state/logs/<KEY>.log` is then a link to the session's Claude Code transcript, so the tracker's run log,
