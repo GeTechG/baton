@@ -89,8 +89,7 @@ In Herdr mode `agent.cmd` is not used: baton opens a tab labelled with the issue
 of the default Herdr session (which must be running; the workspace is created when missing), sources `state/agent.env`
 (the `AGENT_X` values, mode 600) in its shell, starts `claude` there under the agent name `<key in lower case>` and sends
 the prompt. `state/logs/<KEY>.log` is then a link to the session's Claude Code transcript, so the tracker's run log,
-`watch.mjs`, `status.sh` and `down.sh --all` work as for a headless run (a killed agent leaves its tab with a shell). Trust the worktrees directory in Claude Code once, or the first run of an issue
-stops at the trust dialog.
+`watch.mjs`, `status.sh` and `down.sh --all` work as for a headless run (a killed agent leaves its tab with a shell). Claude Code asks interactively whether to trust a folder it has not seen, which every new worktree is: baton answers yes.
 Nothing project-specific lives in this repo: `config.json`, `.env` and `local/` are gitignored.
 
 ## Agent skill

@@ -175,7 +175,12 @@ function pane(key, r, runs, sess, text) {
   const made = H('tab', 'create', '--workspace', ws, '--cwd', r.wt, '--label', key, '--no-focus');
   r.tab = made.tab.tab_id; saveRuns(runs); // persist right away: the next run closes this tab even if the launch below fails
   H('pane', 'run', made.root_pane.pane_id, `. '${DIR}/agent.env'`);
-  H('agent', 'start', name, '--kind', 'claude', '--pane', made.root_pane.pane_id, '--', ...(CFG.herdr.args ?? ['--permission-mode', 'auto', '--disallowedTools', 'AskUserQuestion']), ...sess);
+  try { H('agent', 'start', name, '--kind', 'claude', '--pane', made.root_pane.pane_id, '--', ...(CFG.herdr.args ?? ['--permission-mode', 'auto', '--disallowedTools', 'AskUserQuestion']), ...sess); } catch (e) {
+    // A new worktree is a folder Claude Code has not seen, and interactively it asks whether to trust it (headless it
+    // never does). baton made this worktree from the configured repo: say yes (the dialog opens on "No, exit").
+    if (!run('herdr', ['agent', 'read', name, '--source', 'visible']).includes('Yes, I trust')) throw e;
+    H('agent', 'send-keys', name, 'down', 'enter'); H('agent', 'wait', name, '--until', 'idle', '--timeout', '30000');
+  }
   r.pid = H('pane', 'process-info', '--pane', made.root_pane.pane_id).process_info.foreground_process_group_id; // for status.sh and down.sh --all
   H('agent', 'prompt', name, text);
   try_(() => H('agent', 'wait', name, '--until', 'working', '--timeout', '15000')); // or the next tick sees it idle and starts it again
