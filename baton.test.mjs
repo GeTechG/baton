@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, said, team, picks, reason, byBoard } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, said, team, picks, reason, byBoard, firstPrompt, setup } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -36,6 +36,30 @@ test('run decision: leave a live agent alone, park a waiting issue, restart a qu
 test('agent env: AGENT_X becomes X and overrides, baton-only values stay out of reach of the rename', () => {
   assert.deepEqual(agentEnv({ HOME: '/h', LIFIC_API_KEY: 'baton', AGENT_LIFIC_API_KEY: 'bot', AGENT_GH_TOKEN: 't' }, { LIFIC_URL: 'u' }),
     { HOME: '/h', LIFIC_API_KEY: 'bot', GH_TOKEN: 't', LIFIC_URL: 'u' });
+});
+
+test('project setup: nothing runs without the field; with it the command runs in the new worktree; a failure parks the issue', async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const wt = mkdtempSync(`${(await import('node:os')).tmpdir()}/baton-`);
+  try {
+    assert.equal(setup({}, 'OS-1', `${wt}/missing`, '/src'), null); // a command would have failed in a missing directory
+    assert.equal(setup({ setup: 'echo "$BATON_ISSUE $BATON_SOURCE" > out\npwd >> out' }, 'OS-1', wt, '/src'), null);
+    const [env, cwd] = readFileSync(`${wt}/out`, 'utf8').trim().split('\n');
+    assert.equal(env, 'OS-1 /src');
+    assert.equal(cwd.split('/').pop(), wt.split('/').pop());
+    assert.equal(setup({ setup: 'echo one; echo two >&2; exit 3' }, 'OS-1', wt, '/src'), 'one\ntwo'); // the comment's text
+    assert.match(setup({ setup: 'exit 3' }, 'OS-1', wt, '/src'), /sh/); // silent failure: the error itself
+    assert.equal(setup({ setup: 'yes | head -c 5000; exit 1' }, 'OS-1', wt, '/src').length, 1500);
+  } finally { rmSync(wt, { recursive: true, force: true }); }
+  // The failed issue gets the human label and no run: the next tick parks it.
+  assert.equal(runStep(false, whyNot(issue('OS-1', { fp: 'src/a.js' }, ['needs-human']), [], () => 'done'), 0, 3), 'park');
+});
+
+test('first prompt: the agent instructions and the issue; project guidance only when the project has it', () => {
+  const a = { instructions: 'You implement one issue.' }, p = { repo: 'o/r', base: 'main' }, i = { identifier: 'OS-1' };
+  assert.equal(firstPrompt(a, p, i), 'You implement one issue.\n\nYour issue: OS-1. Repo o/r, base branch `main`.');
+  assert.equal(firstPrompt(a, { ...p, instructions: 'Search Haxe code with Serena.' }, i),
+    'You implement one issue.\n\nYour issue: OS-1. Repo o/r, base branch `main`.\n\nProject guidance:\nSearch Haxe code with Serena.');
 });
 
 test('overlaps: path prefix, directory, disjoint, empty is conservative', () => {

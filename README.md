@@ -77,11 +77,21 @@ baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `s
 One entry in `config.json` `projects`, keyed by the Lific project name: `repo` and `base` (any branch; where the
 footprint tree and `AGENTS.md` are read from and what issue worktrees start at), and optionally `path` (your local
 checkout of the repo — issue worktrees are made from it; without it baton keeps its own clone under `state/src/`),
-`worktrees` (where they go; default `<path>.wt`) and `footprintHint`.
+`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `setup` and `instructions`.
+
+`setup` is a shell command baton runs in an issue's worktree right after creating it, before the agent starts (so also
+after the `fresh` label; not on later runs in the kept worktree): what the repo needs before a session and its MCP
+servers come up, e.g. a toolchain, an LSP config, submodules. Its cwd is the worktree; `BATON_SOURCE` is the project's
+local checkout the worktree hangs off, `BATON_ISSUE` the issue key. If it fails, no agent starts: the worktree is
+removed, the issue gets `needs-human` and a comment with the tail of the command's output (also a `setup failed` line
+in `bridge.log`), and is parked; remove the label to try again. It runs inside baton's tick, so keep it short.
+
+`instructions` is text for the agents of this project only: baton appends it to an agent's first prompt on the issue
+as a paragraph headed `Project guidance:`. The agents' own instructions stay project-independent.
 
 An agent run is `agent.cmd` in `config.json` (default: Claude Code, headless, stream-json into `state/logs/<KEY>.log`)
 plus `--model <the agent's model>`, `--session-id <uuid>` on the agent's first run on the issue or `--resume <uuid>`
-after that (a session that never started is not resumed), then the prompt: the agent's `instructions` and the issue key, repo and base branch.
+after that (a session that never started is not resumed), then the prompt: the agent's `instructions`, the issue key, repo and base branch, and the project's `instructions` if set.
 Nothing project-specific lives in this repo: `config.json`, `.env` and `local/` are gitignored.
 
 ## Agent skill
