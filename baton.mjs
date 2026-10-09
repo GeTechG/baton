@@ -126,6 +126,20 @@ export function repoMap(paths, budget = 40000) {
   }
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
 }
+// The first prompt of an agent on an issue: its own instructions (project-independent), the issue, and what only this
+// project's repo needs (p.instructions).
+export const firstPrompt = (a, p, i) => `${a.instructions}\n\nYour issue: ${i.identifier}. Repo ${p.repo}, base branch \`${p.base}\`.` +
+  (p.instructions ? `\n\nProject guidance:\n${p.instructions}` : '');
+// p.setup: a shell command that prepares a new issue worktree (toolchain, LSP config, submodules) before the agent's
+// session and its MCP servers start in it. null = done or nothing to do; otherwise the tail of what it printed.
+// ponytail: it runs inside the tick with no timeout, so a slow setup delays every other issue; make it async if that hurts.
+export function setup(p, key, wt, src) {
+  if (!p.setup) return null;
+  try {
+    execFileSync('sh', ['-c', `exec 2>&1\n${p.setup}`], { cwd: wt, env: { ...process.env, BATON_SOURCE: src, BATON_ISSUE: key }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: Infinity });
+    return null;
+  } catch (e) { return (e.stdout?.trim() || e.message).slice(-1500); }
+}
 
 // ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, agent, session, wt, n, total, pos } } ----
 const RUNS = `${DIR}/runs.json`;
@@ -145,12 +159,19 @@ function source(p) {
   if (!existsSync(dir)) run('git', ['clone', '-q', `https://github.com/${p.repo}.git`, dir]);
   return dir;
 }
+// null = p.setup failed: no worktree is left (the next attempt makes and prepares a new one) and the issue waits for a human.
 function worktree(p, key) { // detached at origin/<base>; the agent creates or checks out its own branch
   const src = source(p), wt = resolve(p.worktrees ? resolve(ROOT, p.worktrees) : `${src}.wt`, key), git = (...a) => run('git', ['-C', src, ...a]);
   if (existsSync(wt)) return wt;
   git('fetch', '-q', 'origin'); git('worktree', 'prune');
   git('worktree', 'add', '-q', '--detach', wt, `origin/${p.base}`);
-  return wt;
+  const err = setup(p, key, wt, src);
+  if (err == null) return wt;
+  try_(() => git('worktree', 'remove', '--force', wt)); rmSync(wt, { recursive: true, force: true });
+  comment(key, `Bridge: the project's \`setup\` command failed in the new worktree, so no agent was started. Its last output:\n\n\`\`\`\n${err}\n\`\`\``);
+  relabel(key, 'add', CFG.humanLabel);
+  log(null, 'setup failed', key, err.split('\n').pop());
+  return null;
 }
 function forget(p, key, runs) { // the issue's worktree and session are gone; pushed work stays on its branch
   const wt = runs[key]?.wt;
@@ -177,8 +198,8 @@ function start(p, i, runs, a) {
   const r = runs[i.identifier] ??= { n: 0 }, handed = r.agent !== a.name, first = handed || !sessionFile(r);
   if (handed) Object.assign(r, { agent: a.name, n: 0 });
   if (first) r.session = randomUUID();
-  r.wt ??= worktree(p, i.identifier);
-  const prompt = first ? `${a.instructions}\n\nYour issue: ${i.identifier}. Repo ${p.repo}, base branch \`${p.base}\`.`
+  if (!(r.wt ??= worktree(p, i.identifier))) { delete runs[i.identifier]; i.labels.push(CFG.humanLabel); return; } // parked on the next tick
+  const prompt = first ? firstPrompt(a, p, i)
     : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
   const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
