@@ -7,10 +7,12 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 
 - **Waves:** humans file issues as `todo`. When no agent run is active, baton asks the orchestrator once: one model
   call that sees the first `maxWave` (default 5, in the board's manual order: higher = first) not yet started `todo`
-  issues and every parked one, with their descriptions, footprints and people's latest comments, the other open and recently closed issues,
+  issues and every parked one, with their descriptions, footprints, blockers (each with its status: all closed, baton checked) and people's latest comments, the other open and recently closed issues,
   every agent's name and description, and each project's `AGENTS.md`. It answers which issues start now and which
   agent takes each; baton starts them and stays out of the way until every run has ended. It is asked again only
-  when something about the issues changed (a new comment from a person on a waiting issue counts). When it starts nothing, its one-line reason goes to `bridge.log`.
+  when something about the issues or the offer changed (a new comment from a person on a waiting issue counts). When it starts nothing, its one-line reason goes to `bridge.log`,
+  and since one wrong "nothing" would hold the queue until somebody touches an issue, it is asked again 1, then 5, then 15 minutes later
+  (`waveRetrySec`, seconds; `[]` = never); after that its answer stands until something changes.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
   "blocked by" links, across projects too), the `needs-human` label, and a `footprint` property (Haiku-estimated if
   missing) that overlaps an issue of the same project that is `active` or `in_review`.
@@ -54,7 +56,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
      }
    }
    ```
-   Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`,
+   Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `waveRetrySec`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`,
    `herdr` (`true`, or `{ "workspace": "baton-agents" }`: the label of the workspace the tabs go to, in the default Herdr session, which must be running).
 4. `scripts/up.sh` (or, with `.env` exported, `npm start` / `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
