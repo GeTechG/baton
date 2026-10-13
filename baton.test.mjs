@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, tail, holder, snapshot, said, team, picks, reason, byBoard, firstPrompt, setup } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, said, team, picks, reason, byBoard, firstPrompt, setup } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -36,6 +36,10 @@ test('run decision: leave a live agent alone, park a waiting issue, restart a qu
 test('agent env: AGENT_X becomes X and overrides, baton-only values stay out of reach of the rename', () => {
   assert.deepEqual(agentEnv({ HOME: '/h', LIFIC_API_KEY: 'baton', AGENT_LIFIC_API_KEY: 'bot', AGENT_GH_TOKEN: 't' }, { LIFIC_URL: 'u' }),
     { HOME: '/h', LIFIC_API_KEY: 'bot', GH_TOKEN: 't', LIFIC_URL: 'u' });
+});
+
+test('agent PATH: the lific wrapper first, then the tools installed in the worktree, then the inherited PATH', () => {
+  assert.equal(agentPath('/b/bin', '/wt/K-1', '/usr/bin'), '/b/bin:/wt/K-1/node_modules/.bin:/usr/bin');
 });
 
 test('project setup: nothing runs without the field; with it the command runs in the new worktree; a failure parks the issue', async () => {

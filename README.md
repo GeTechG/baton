@@ -44,6 +44,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
 2. `.env` (gitignored): `LIFIC_API_KEY=` baton's key, `AGENT_LIFIC_API_KEY=` the agents' key, `AGENT_GH_TOKEN=` the
    GitHub token agents push with. Every `AGENT_X` reaches the agent processes as `X`; baton itself uses the machine's `gh` login.
+   An agent's `PATH` starts with baton's `lific` wrapper and its worktree's `node_modules/.bin`.
 3. Write `config.json` (gitignored):
    ```json
    {

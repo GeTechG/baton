@@ -77,6 +77,8 @@ export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why
 // GitHub token live in .env under that prefix, so baton itself never runs with them), plus `extra`.
 export const agentEnv = (env, extra = {}) => ({ ...Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('AGENT_'))),
   ...Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('AGENT_')).map(([k, v]) => [k.slice(6), v])), ...extra });
+// The agent's PATH: baton's `lific` wrapper, then the worktree's own npm tools (what `npm run` would add), then baton's.
+export const agentPath = (bin, wt, path) => `${bin}:${wt}/node_modules/.bin:${path}`;
 // Who runs the issue next: the agent its `agent` property names, else the one that ran it last, else the base worker
 // (an issue a human set `active` by hand).
 export const holder = (i, r, dflt = 'worker') => i.agent ?? r?.agent ?? dflt;
@@ -205,7 +207,7 @@ function start(p, i, runs, a) {
   const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
   r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
   const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
-    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: `${DIR}/bin:${process.env.PATH}` }) });
+    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH) }) });
   child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
   if (CFG.herdr) try { watchTab(i.identifier, r); } catch (e) { log('herdr', 'herdr tab failed', e.message.split('\n')[0]); }
   child.unref(); r.pid = child.pid; r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off, review or park; total names the run
