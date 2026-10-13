@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, said, team, picks, reason, byBoard, firstPrompt, setup } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -182,6 +182,29 @@ test('wave: the orchestrator is asked again only when the issues changed', () =>
   assert.notEqual(snapshot([a]), snapshot([{ ...a, status: 'done' }]));
   assert.notEqual(snapshot([a]), snapshot([{ ...a, agent: 'reviewer' }]));
   assert.notEqual(snapshot([a]), snapshot([{ ...a, said: ['sergey: follow upstream'] }]));
+  const b = issue('OS-2', { fp: 'src/b.js', bb: ['LIB-3'] }); // its blocker closed in a project baton does not list: only the offer changed
+  assert.notEqual(snapshot([a, b], [a]), snapshot([a, b], [a, b]));
+  assert.notEqual(snapshot([a, b], [a, b]), snapshot([a, b], [b, a]));
+});
+
+test('wave: one that started nothing is asked again after each pause, a limited number of times', () => {
+  const pauses = [60, 300];
+  assert.equal(again(0, 9999, pauses), false); // the last wave started something, or there was none
+  assert.equal(again(1, 59, pauses), false);
+  assert.equal(again(1, 60, pauses), true);
+  assert.equal(again(2, 60, pauses), false);
+  assert.equal(again(2, 300, pauses), true);
+  assert.equal(again(3, 9999, pauses), false); // out of retries: the answer stands until the issues change
+  assert.equal(again(1, 9999, []), false); // waveRetrySec: [] turns it off
+});
+
+test('wave: a waiting issue is shown with its blockers and their status, whatever its description says', () => {
+  const i = { ...issue('SPR-158', { fp: 'src/a.js', bb: ['SPR-157', 'LIB-3'] }, ['mobile']), title: 'Screen', description: 'Waits for SPR-157.' };
+  assert.equal(offered(i, 'o/r', undefined, () => 'done'),
+    '## SPR-158 [o/r] Screen\nstatus: todo (not started); labels: mobile; footprint: src/a.js; blockers: SPR-157 (done), LIB-3 (done)\nWaits for SPR-157.');
+  assert.equal(offered({ ...issue('OS-1', { fp: '' }), title: 'T', said: ['sergey: go'] }, 'o/r', { agent: 'worker' }, () => 'done'),
+    '## OS-1 [o/r] T\nstatus: started earlier by worker, parked; labels: -; footprint: -; blockers: none\n' +
+    '\nComments from people since (latest last; they may settle what the description leaves open):\n- sergey: go');
 });
 
 test('wave: the orchestrator sees what people commented, not the agents, latest last', () => {

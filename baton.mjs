@@ -22,7 +22,7 @@ import { plain, say } from './watch.mjs';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.maxWave ??= 5; CFG.maxRuns ??= 3; CFG.tickSec ??= 5;
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.maxWave ??= 5; CFG.maxRuns ??= 3; CFG.tickSec ??= 5; CFG.waveRetrySec ??= [60, 300, 900];
 CFG.agent ??= {}; CFG.agent.user ??= 'agent'; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.lific) CFG.lific.bin = resolve(ROOT, CFG.lific.bin);
@@ -90,8 +90,19 @@ export function whyNot(i, flight, statusOf) {
   const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint));
   return clash ? `footprint overlaps ${clash.identifier}` : null;
 }
-// What the orchestrator decided on; it is asked again only when this changes (so an empty wave is not re-asked every tick).
-export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.footprint, i.title, i.description, i.said]));
+// What the orchestrator decided on: the open issues and which of them were offered, in that order (a blocker closed in
+// a project baton does not list, or a new board order, changes only the offer). A change of this = ask it again.
+export const snapshot = (issues, waiting = []) => JSON.stringify([waiting.map((i) => i.identifier),
+  issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.footprint, i.title, i.description, i.said])]);
+// Nothing changed since the last wave: ask the orchestrator anyway? Only after a wave that started nothing although
+// issues were offered (one wrong "nothing" must not hold the queue until a human touches an issue): once per pause,
+// `sec` after the `empties`-th such wave in a row. Past the last pause the answer stands until something changes.
+export const again = (empties, sec, pauses = CFG.waveRetrySec) => empties > 0 && sec >= pauses[empties - 1];
+// One WAITING issue as the orchestrator sees it (r = its run, if it was started before). Its blockers come with their
+// status: a description that still says "waits for X" must not outweigh the tracker.
+export const offered = (i, repo, r, statusOf) => `## ${i.identifier} [${repo}] ${i.title}\nstatus: ${r ? `started earlier by ${r.agent}, parked` : 'todo (not started)'}; ` +
+  `labels: ${i.labels.join(', ') || '-'}; footprint: ${i.footprint.join(', ') || '-'}; blockers: ${i.blockedBy.map((k) => `${k} (${statusOf(k)})`).join(', ') || 'none'}\n${i.description ?? ''}` +
+  (i.said?.length ? `\nComments from people since (latest last; they may settle what the description leaves open):\n${i.said.map((c) => `- ${c}`).join('\n')}` : '');
 // What people wrote on a waiting issue, for the orchestrator (a decision is often given in a comment, not in the
 // description): the last `n` comments not by the agents' tracker user, oldest first, one capped line each.
 export const said = (comments, bot = CFG.agent.user, n = 5) => comments.filter((c) => c.author !== bot)
@@ -243,7 +254,7 @@ function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the 
 }
 
 // One model call, no tools: the model and extra guidance come from the orchestrator agent `o` (agents/orchestrator.json).
-function orchestrate(projects, issues, waiting, agents, o, runs) {
+function orchestrate(projects, issues, waiting, agents, o, runs, statusOf) {
   const repo = (i) => projects[i.project_id].repo;
   const rules = [...new Set(waiting.map((i) => projects[i.project_id]))].map((p) => `## ${p.repo}\n` +
     (try_(() => gh('api', `repos/${p.repo}/contents/AGENTS.md?ref=${p.base}`, '-H', 'Accept: application/vnd.github.raw'))?.slice(0, 8000) ?? '(no AGENTS.md)'));
@@ -252,12 +263,13 @@ function orchestrate(projects, issues, waiting, agents, o, runs) {
     .sort((a, b) => a.updated_at.localeCompare(b.updated_at)).slice(-15);
   const prompt = 'You are the orchestrator of a team of coding agents. Nothing is running right now. Decide which of the WAITING ' +
     'tasks start now, in parallel, and which agent takes each. Start a task only if it makes sense now: leave out one that ' +
-    'logically follows another waiting or unfinished task, or would collide with one you start. Starting nothing is a valid answer.\n\n' +
+    'logically follows another waiting or unfinished task, or would collide with one you start. Starting nothing is a valid answer.\n' +
+    'Every WAITING task has already passed the scheduler\'s own checks: all its blockers are closed (they are listed with their ' +
+    'status) and its footprint overlaps no task that is in work. Do not check these two again from descriptions or comments: ' +
+    'text that says a task still waits for a closed task is out of date. A closed task is finished and nothing collides with it.\n\n' +
     `# Agents\n${agents.map((a) => `- ${a.name}: ${a.description || '(no description)'}`).join('\n')}\n\n` +
     `# Project rules\n${rules.join('\n\n')}\n\n` +
-    `# WAITING (the human's order: top = do first)\n${waiting.map((i) => `## ${i.identifier} [${repo(i)}] ${i.title}\nstatus: ${runs[i.identifier] ? `started earlier by ${runs[i.identifier].agent}, parked` : 'todo (not started)'}; labels: ${i.labels.join(', ') || '-'}; ` +
-      `footprint: ${i.footprint.join(', ') || '-'}\n${i.description ?? ''}` +
-      (i.said?.length ? `\nComments from people since (latest last; they may settle what the description leaves open):\n${i.said.map((c) => `- ${c}`).join('\n')}` : '')).join('\n\n')}\n\n` +
+    `# WAITING (the human's order: top = do first)\n${waiting.map((i) => offered(i, repo(i), runs[i.identifier], statusOf)).join('\n\n')}\n\n` +
     `# Other open tasks\n${issues.filter((i) => !waiting.includes(i)).map(line).join('\n') || '-'}\n\n` +
     `# Recently closed\n${closed.map(line).join('\n') || '-'}\n\n` +
     (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
@@ -265,7 +277,7 @@ function orchestrate(projects, issues, waiting, agents, o, runs) {
   return execFileSync('claude', ['-p', '--model', o.model || 'sonnet', '--max-turns', '1'], { input: prompt, encoding: 'utf8' });
 }
 
-let lastWave = null;
+let last = { snap: null, empties: 0, at: 0 }; // the last wave: what it was decided on, how many in a row started nothing, when
 function tick() {
   const runs = loadRuns(), { o, agents } = team(loadAgents(), CFG.orchestrator), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
   const projects = Object.fromEntries(tj('project', 'list').filter((p) => CFG.projects[p.name])
@@ -326,9 +338,10 @@ function tick() {
   const waiting = [...free.filter((x) => runs[x.identifier]), ...free.filter((x) => !runs[x.identifier]).slice(0, CFG.maxWave)];
   if (!waiting.length) return;
   for (const i of waiting) { i.footprint ??= estimateFootprint(projects[i.project_id], i); i.said = said(tj('comment', 'list', i.identifier)); }
-  if (snapshot(issues) === lastWave || issues.some((x) => x.status === 'in_progress')) return;
+  const same = snapshot(issues, waiting) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
+  if (busy() || (same && !again(last.empties, (Date.now() - last.at) / 1000))) return;
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" in agents/`);
-  const out = orchestrate(projects, issues, waiting, agents, o, runs), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
+  const out = orchestrate(projects, issues, waiting, agents, o, runs, statusOf), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
     const i = byKey[key], p = projects[i.project_id], why = whyNot(i, held, statusOf);
     if (why) { log(null, 'wait', key, why); continue; }
@@ -339,7 +352,7 @@ function tick() {
     held.push(i);
   }
   log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : `nothing to start (${reason(out)})`, `of ${waiting.map((i) => i.identifier)}`);
-  lastWave = snapshot(issues);
+  last = { snap: snapshot(issues, waiting), empties: busy() ? 0 : (same ? last.empties : 0) + 1, at: Date.now() };
 }
 
 // Agents call the tracker as plain `lific …`: a wrapper on their PATH pins the HTTP backend (URL and key come from the env).
