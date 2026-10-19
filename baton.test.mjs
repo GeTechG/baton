@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -227,4 +227,30 @@ test('base agents: valid JSON with a name, a description and instructions; one o
   for (const a of all) assert.ok(a.name && a.description && a.instructions, a.name);
   assert.deepEqual(team(all).agents.map((a) => a.name), ['worker']);
   assert.ok(team(all).o);
+});
+
+test('cleanup kills what still runs in the worktree (cwd inside, or a path into it), in its own session; nothing else', async () => {
+  const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  const tmp = mkdtempSync(`${(await import('node:os')).tmpdir()}/baton-`), wt = `${tmp}/wt`, out = `${tmp}/out`;
+  const nap = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  // setsid -f: a new session, and not our child (no zombie of ours keeps the pid)
+  const bg = (cwd, name, ...args) => {
+    execFileSync('setsid', ['-f', 'sh', '-c', `echo $$ > ${tmp}/${name}.n && mv ${tmp}/${name}.n ${tmp}/${name}.pid; exec "$@"`, 'sh', ...args], { cwd, stdio: 'ignore' });
+    for (let i = 0; i < 100 && !existsSync(`${tmp}/${name}.pid`); i++) nap();
+    return +readFileSync(`${tmp}/${name}.pid`, 'utf8');
+  };
+  const gone = (pid) => {
+    for (let i = 0; i < 50; i++, nap()) if (!existsSync(`/proc/${pid}`) || readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1][0] === 'Z') return true;
+    return false;
+  };
+  mkdirSync(wt); mkdirSync(out); writeFileSync(`${wt}/server.js`, 'setInterval(() => {}, 1000)');
+  const inCwd = bg(wt, 'a', 'sleep', '60'), byPath = bg(out, 'b', process.execPath, `${wt}/server.js`), stray = bg(out, 'c', 'sleep', '60');
+  const stubborn = bg(wt, 'd', process.execPath, '-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'); // SIGKILL after the grace
+  try {
+    assert.equal(reap(wt, 300), 3);
+    for (const pid of [inCwd, byPath, stubborn]) assert.ok(gone(pid), `pid ${pid} still alive`);
+    assert.ok(!gone(stray)); // outside the worktree: untouched
+    assert.equal(reap(wt, 300), 0);
+  } finally { try { process.kill(stray, 'SIGKILL'); } catch {} rmSync(tmp, { recursive: true, force: true }); }
 });

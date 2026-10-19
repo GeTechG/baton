@@ -28,8 +28,10 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   hooks, `.mcp.json`, `CLAUDE.md`) is loaded as in an interactive session there. An `active` issue is the agent's to
   move: baton starts it again whenever its process has ended, parks it back to `todo` (it is offered again in the next
   wave) while it waits on a blocker or a human, and after `maxRuns` (default 3) runs of one agent in a row with nothing
-  to show adds `needs-human` instead of burning tokens. `in_review` waits for a review, not for an agent: baton
-  leaves it alone and keeps its footprint reserved. While an issue runs it is assigned to the agents' tracker user
+  to show adds `needs-human` instead of burning tokens. When the issue closes, baton removes its worktree and first stops
+  every process still running in it (cwd inside the worktree or a path into it on the command line: the agent's
+  background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
+  `in_review` waits for a review, not for an agent: baton leaves it alone and keeps its footprint reserved. While an issue runs it is assigned to the agents' tracker user
   (`agent.user`, default `agent`) and its run log in the tracker shows, a tick behind, what the agent is doing.
 - **Hand-offs:** the issue's `agent` property names the agent that holds it. baton sets it when it starts the issue;
   an agent passes the issue on with `lific issue update <KEY> --set agent=<name>` when the repo's rules say so, and the
@@ -37,7 +39,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 - **Herdr mode** (`"herdr": true` in `config.json`): every issue that runs gets a tab in a [Herdr](https://herdr.dev)
   workspace with the detailed live view of its agent (`node watch.mjs <KEY>`): what it says, every tool call and skill,
   the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue.
-- **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both and removes the label; unpushed work in the old worktree is lost).
+- **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both, stops the worktree's processes as on close, and removes the label; unpushed work in the old worktree is lost).
 
 ## Run
 1. Lific: put the binary at `bin/lific` (it must be built from the `baton-features` branch of the fork: `in_review` status, issue properties,
