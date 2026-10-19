@@ -8,11 +8,12 @@
 // Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, overlapping
 // `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
 // ponytail: prefix-match footprints, 100 open issues per project and status, one `issue get` per open issue per tick,
-// a run is "alive" while its pid exists (a reboot can recycle it), agents and the orchestrator run on the claude CLI only.
+// a run is "alive" while its pid exists (a reboot can recycle it), a worktree's processes are found in /proc (Linux only),
+// agents and the orchestrator run on the claude CLI only.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,11 +187,25 @@ function worktree(p, key) { // detached at origin/<base>; the agent creates or c
   log(null, 'setup failed', key, err.split('\n').pop());
   return null;
 }
-function forget(p, key, runs) { // the issue's worktree and session are gone; pushed work stays on its branch
-  const wt = runs[key]?.wt;
+// The processes still running in a worktree (cwd inside it, or a path into it on the command line): an agent's background
+// commands and dev servers leave its process group, so they outlive it. SIGTERM, then SIGKILL after `graceMs`; returns the count.
+export function reap(wt, graceMs = 3000) {
+  const root = try_(() => realpathSync(wt)) ?? wt, inside = (x) => [root, wt].some((r) => x === r || x.includes(`${r}/`));
+  const scan = () => readdirSync('/proc').filter((d) => /^\d+$/.test(d) && +d !== process.pid).map(Number).filter((pid) =>
+    try_(() => inside(readlinkSync(`/proc/${pid}/cwd`))) || try_(() => readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').some(inside)));
+  const kill = (sig) => scan().map((pid) => try_(() => process.kill(pid, sig)));
+  const n = kill('SIGTERM').length, end = Date.now() + graceMs;
+  while (n && scan().length && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); // a zombie has no cwd: it drops out
+  kill('SIGKILL');
+  return n;
+}
+// The issue's worktree, its processes and its session are gone; pushed work stays on its branch. Returns log words.
+function forget(p, key, runs) {
+  const wt = runs[key]?.wt, killed = wt ? reap(wt) : 0;
   if (runs[key]?.watch) try_(() => H('tab', 'close', runs[key].watch));
   if (wt) { try_(() => run('git', ['-C', source(p), 'worktree', 'remove', '--force', wt])); rmSync(wt, { recursive: true, force: true }); }
   delete runs[key]; saveRuns(runs);
+  return killed ? ['killed', killed] : [];
 }
 // The Claude Code transcript of the run's session, if that session ever started (a run that died before it has nothing to resume).
 function sessionFile(r, root = `${process.env.CLAUDE_CONFIG_DIR ?? `${homedir()}/.claude`}/projects`) {
@@ -236,10 +251,10 @@ function forward(runs) {
   }
 }
 function restartFresh(p, i, runs) {
-  forget(p, i.identifier, runs);
+  const killed = forget(p, i.identifier, runs);
   relabel(i.identifier, 'remove', CFG.freshLabel);
   i.labels = i.labels.filter((l) => l !== CFG.freshLabel);
-  log(null, 'fresh', i.identifier, 'next run starts with a new session and worktree');
+  log(null, 'fresh', i.identifier, 'next run starts with a new session and worktree', ...killed);
 }
 
 function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
@@ -292,7 +307,7 @@ function tick() {
   // A closed issue gives its worktree and session back.
   for (const key of Object.keys(runs)) {
     const i = try_(() => (statusOf(key), byKey[key]));
-    if (i && CLOSED.includes(i.status) && !alive(runs[key])) { forget(projects[i.project_id], key, runs); log(null, 'cleanup', key); }
+    if (i && CLOSED.includes(i.status) && !alive(runs[key])) log(null, 'cleanup', key, ...forget(projects[i.project_id], key, runs));
   }
 
   // Tell the human once per needs-human episode (state/notified.json, so restarts don't re-ping).
