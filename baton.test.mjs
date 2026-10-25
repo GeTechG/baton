@@ -289,10 +289,12 @@ test('agents\' lific: marks the content of comment add, in every spelling, and n
 });
 
 test('agents\' lific wrapper: runs the tracker CLI on the HTTP backend with the run\'s mark, passes its exit code', async () => {
-  const { mkdtempSync, writeFileSync, chmodSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { spawnSync } = await import('node:child_process');
-  const dir = mkdtempSync(`${tmpdir()}/baton-lific-`), fake = `${dir}/real-lific`, wrap = `${dir}/lific`;
+  const { mkdtempSync, writeFileSync, chmodSync, symlinkSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { spawnSync } = await import('node:child_process');
+  const dir = mkdtempSync(`${tmpdir()}/baton-lific-`), fake = `${dir}/real-lific.cjs`, wrap = `${dir}/lific`;
+  // as baton lays it out: lific -> lific.cjs, in a directory under a "type": "module" package.json (state/ in baton's repo)
+  writeFileSync(`${dir}/package.json`, '{ "type": "module" }');
   writeFileSync(fake, `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 3;\n`); chmodSync(fake, 0o755);
-  writeFileSync(wrap, lificWrapper(process.execPath, fake)); chmodSync(wrap, 0o755);
+  writeFileSync(`${dir}/lific.cjs`, lificWrapper(process.execPath, fake)); chmodSync(`${dir}/lific.cjs`, 0o755); symlinkSync('lific.cjs', wrap);
   const r = spawnSync(wrap, ['comment', 'add', 'OS-1', '--content=it\'s "done"'], { env: { BATON_RUN: runMark('OS-1', 2) }, encoding: 'utf8' });
   assert.equal(r.status, 3);
   assert.deepEqual(JSON.parse(r.stdout), ['--backend', 'http', 'comment', 'add', 'OS-1', '--content=it\'s "done"\n\n<!-- baton OS-1 run 2 -->']);
