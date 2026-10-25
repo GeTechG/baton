@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Scheduler and agent runner between Lific (the tracker) and the repos its agents work in; everything project-specific
-// is in config.json ($BATON_CONFIG). Humans file issues as `todo`. When no agent run is active, the orchestrator (one
-// model call) looks at the waiting issues and picks the next wave: which start now and which agent (agents/*.json)
-// takes each. baton alone moves an issue to `active`, gives it a git worktree off the project's local checkout and runs
+// is in config.json ($BATON_CONFIG). Humans file issues as `todo`. While fewer than cfg.maxWave issues are in work, the
+// orchestrator (one model call) looks at the waiting issues and fills the free slots: which start now and which agent
+// (agents/*.json) takes each. baton alone moves an issue to `active`, gives it a git worktree off the project's local checkout and runs
 // the agent there (one worktree per issue, one session per agent on it, kept until the issue closes; the issue is
 // assigned to cfg.agent.user, its `agent` property names who holds it and its run log shows what the agent does).
 // Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, overlapping
@@ -108,6 +108,16 @@ export const snapshot = (issues, waiting = []) => JSON.stringify([waiting.map((i
 // issues were offered (one wrong "nothing" must not hold the queue until a human touches an issue): once per pause,
 // `sec` after the `empties`-th such wave in a row. Past the last pause the answer stands until something changes.
 export const again = (empties, sec, pauses = CFG.waveRetrySec) => empties > 0 && sec >= pauses[empties - 1];
+// What the orchestrator is offered, from the todo issues free of blockers and humans (board order): those that pass
+// ok(i) (no footprint overlap with an issue in work), every parked one (has a run) and the first `max` not yet started.
+// Parked first. ok is called only on what is still in reach of the window: it may estimate a footprint.
+export function offer(todo, ok, parked, max = CFG.maxWave) {
+  let n = 0;
+  const res = todo.filter((i) => (parked(i) || n < max) && ok(i) && (parked(i) || ++n));
+  return [...res.filter(parked), ...res.filter((i) => !parked(i))];
+}
+// Free slots: cfg.maxWave issues may be in work (in_progress) at once.
+export const slots = (issues, max = CFG.maxWave) => max - issues.filter((i) => i.status === 'in_progress').length;
 // One WAITING issue as the orchestrator sees it (r = its run, if it was started before). Its blockers come with their
 // status: a description that still says "waits for X" must not outweigh the tracker.
 export const offered = (i, repo, r, statusOf) => `## ${i.identifier} [${repo}] ${i.title}\nstatus: ${r ? `started earlier by ${r.agent}, parked` : 'todo (not started)'}; ` +
@@ -341,16 +351,18 @@ function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the 
 }
 
 // One model call, no tools: the model and extra guidance come from the orchestrator agent `o` (agents/orchestrator.json).
-function orchestrate(projects, issues, waiting, agents, o, runs, statusOf) {
+function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room) {
   const repo = (i) => projects[i.project_id].repo;
   const rules = [...new Set(waiting.map((i) => projects[i.project_id]))].map((p) => `## ${p.repo}\n` +
     (try_(() => gh('api', `repos/${p.repo}/contents/AGENTS.md?ref=${p.base}`, '-H', 'Accept: application/vnd.github.raw'))?.slice(0, 8000) ?? '(no AGENTS.md)'));
   const line = (i) => `- ${i.identifier} [${repo(i)}] ${i.status}${i.agent && !CLOSED.includes(i.status) ? `, held by ${i.agent}` : ''}${i.blockedBy?.length ? `, blocked-by ${i.blockedBy}` : ''}: ${i.title}`;
   const closed = Object.values(projects).flatMap((p) => tj('issue', 'list', '-p', p.key, '--status', 'done', '--limit', '100'))
     .sort((a, b) => a.updated_at.localeCompare(b.updated_at)).slice(-15);
-  const prompt = 'You are the orchestrator of a team of coding agents. Nothing is running right now. Decide which of the WAITING ' +
-    'tasks start now, in parallel, and which agent takes each. Start a task only if it makes sense now: leave out one that ' +
-    'logically follows another waiting or unfinished task, or would collide with one you start. Starting nothing is a valid answer.\n' +
+  const inWork = issues.filter((i) => i.status === 'in_progress').length;
+  const prompt = `You are the orchestrator of a team of coding agents. ${inWork ? `${inWork} task(s) are in work right now (in_progress under Other open tasks)` : 'Nothing is running right now'}; ` +
+    `${room} slot(s) are free. Decide which of the WAITING tasks start now, in parallel, at most ${room}, and which agent takes each. ` +
+    'Start a task only if it makes sense now: leave out one that logically follows another waiting or unfinished task, or would ' +
+    'collide with one in work or one you start. Starting nothing is a valid answer.\n' +
     'Every WAITING task has already passed the scheduler\'s own checks: all its blockers are closed (they are listed with their ' +
     'status) and its footprint overlaps no task that is in work. Do not check these two again from descriptions or comments: ' +
     'text that says a task still waits for a closed task is out of date. A closed task is finished and nothing collides with it.\n\n' +
@@ -473,22 +485,28 @@ function tick() {
     } else if (step === 'start') start(projects[i.project_id], i, runs, a);
   }
 
-  // Wave: once nothing runs, the orchestrator picks from the startable issues, in board order. cfg.maxWave caps only the
-  // not yet started ones; a todo issue that has a run was parked mid-work and is always offered. A needs-human issue
-  // is human-owned (spec approval, QA): no footprint call, never offered.
+  // Wave: whenever fewer than cfg.maxWave issues are in work, the orchestrator fills the free slots from the startable
+  // issues, in board order. cfg.maxWave also caps the not yet started ones offered; a todo issue that has a run was
+  // parked mid-work and is always offered. A needs-human issue is human-owned (spec approval, QA): no footprint call,
+  // never offered.
   const held = issues.filter(flying);
   const free = issues.filter((x) => x.status === 'todo' && !whyNot(x, [], statusOf));
-  const waiting = [...free.filter((x) => runs[x.identifier]), ...free.filter((x) => !runs[x.identifier]).slice(0, CFG.maxWave)];
-  // The milestone does not hold the waves: it runs detached, and only while the project has nothing running or waiting.
-  milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !waiting.some((x) => projects[x.project_id] === p), statusOf);
+  // The milestone does not hold the waves: it runs detached, and only while nothing runs and nothing of the project waits.
+  milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p), statusOf);
+  const room = slots(issues);
+  if (room <= 0) return;
+  const offering = () => offer(free.filter((x) => x.status === 'todo'), (x) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
+    !whyNot(x, held, statusOf, projects[x.project_id].sharedPaths)), (x) => runs[x.identifier])
+    .map((x) => (x.said ??= said(tj('comment', 'list', x.identifier)), x));
+  const waiting = offering();
   if (!waiting.length) return;
-  for (const i of waiting) { i.footprint ??= estimateFootprint(projects[i.project_id], i); i.said = said(tj('comment', 'list', i.identifier)); }
+  // Asked only when a slot came free or the issues changed (both change the snapshot), or by again() after an empty wave.
   const same = snapshot(issues, waiting) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
-  if (busy() || (same && !again(last.empties, (Date.now() - last.at) / 1000))) return;
+  if (same && !again(last.empties, (Date.now() - last.at) / 1000)) return;
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" in agents/`);
-  const out = orchestrate(projects, issues, waiting, agents, o, runs, statusOf), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
+  const out = orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
-    const i = byKey[key], p = projects[i.project_id], why = whyNot(i, held, statusOf, p.sharedPaths);
+    const i = byKey[key], p = projects[i.project_id], why = slots(issues) <= 0 ? 'no free slot' : whyNot(i, held, statusOf, p.sharedPaths);
     if (why) { log(null, 'wait', key, why); continue; }
     if (freshStep(i, false, 0) === 'on-assign') restartFresh(p, i, runs);
     t('issue', 'update', key, '--status=active', `--assignee=${CFG.agent.user}`, `--set=agent=${agent}`); i.status = 'in_progress'; i.agent = agent;
@@ -497,7 +515,9 @@ function tick() {
     held.push(i);
   }
   log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : `nothing to start (${reason(out)})`, `of ${waiting.map((i) => i.identifier)}`);
-  last = { snap: snapshot(issues, waiting), empties: busy() ? 0 : (same ? last.empties : 0) + 1, at: Date.now() };
+  // The snapshot the next tick will see (its own starts are no change), so the waiting rest is not offered again at once.
+  // While something runs an empty wave is not retried: the next free slot asks again.
+  last = { snap: snapshot(issues, offering()), empties: busy() ? 0 : (same ? last.empties : 0) + 1, at: Date.now() };
 }
 
 // Agents call the tracker as plain `lific …`: a wrapper on their PATH pins the HTTP backend (URL and key come from the env).

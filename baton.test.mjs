@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offer, slots, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -197,6 +197,23 @@ test('wave: the orchestrator is asked again only when the issues changed', () =>
   const b = issue('OS-2', { fp: 'src/b.js', bb: ['LIB-3'] }); // its blocker closed in a project baton does not list: only the offer changed
   assert.notEqual(snapshot([a, b], [a]), snapshot([a, b], [a, b]));
   assert.notEqual(snapshot([a, b], [a, b]), snapshot([a, b], [b, a]));
+});
+
+test('wave: free slots are filled while other issues run; the offer skips what overlaps work in progress', () => {
+  const run = { ...issue('OS-1', { fp: 'src/a.js' }), status: 'in_progress' };
+  const rev = { ...issue('OS-2', { fp: 'src/r.js' }), status: 'in_review' };
+  assert.equal(slots([run, rev, issue('OS-3')], 3), 2); // in_review waits for a review, not a run: no slot
+  assert.equal(slots([run, { ...run, identifier: 'OS-4' }], 2), 0);
+  assert.equal(slots([], 5), 5);
+  const todo = [issue('OS-5', { fp: 'src/a.js' }), issue('OS-6', { fp: 'src/r.js/x' }), issue('OS-7', { fp: 'src/b.js' }),
+    issue('OS-8', { fp: 'src/c.js' }), issue('OS-9', { fp: 'src/d.js' }), issue('OS-10', { fp: 'src/a.js' })];
+  const ok = (i) => !whyNot(i, [run, rev], () => 'done'), keys = (l) => l.map((i) => i.identifier);
+  assert.deepEqual(keys(offer(todo, ok, () => false, 2)), ['OS-7', 'OS-8']); // an overlapping one does not take a place in the window
+  assert.deepEqual(keys(offer(todo, ok, (i) => i.identifier === 'OS-9', 1)), ['OS-9', 'OS-7']); // parked: always offered, first
+  assert.deepEqual(keys(offer(todo, ok, (i) => i.identifier === 'OS-10', 5)), ['OS-7', 'OS-8', 'OS-9']); // a parked one overlapping work waits too
+  const asked = [];
+  offer(todo, (i) => (asked.push(i.identifier), ok(i)), () => false, 1);
+  assert.deepEqual(asked, ['OS-5', 'OS-6', 'OS-7']); // ok (it may estimate a footprint) only while the window is not full
 });
 
 test('wave: one that started nothing is asked again after each pause, a limited number of times', () => {

@@ -40,7 +40,7 @@ fighting the scheduler.
 
 ## How an issue becomes ready
 
-baton works in waves. While any agent run is active it starts nothing. Once all runs have ended, its orchestrator (one
+baton keeps up to a few issues (`maxWave`) in work at once. Whenever a slot is free, its orchestrator (one
 model call) reads the waiting issues with people's latest comments on them, the agents' descriptions and each repo's `AGENTS.md`, and picks which issues start
 now and which agent takes each. An issue can be picked only when all of these hold:
 
@@ -51,7 +51,7 @@ now and which agent takes each. An issue can be picked only when all of these ho
 - if it has not been started yet, it is among the first few such issues in the board's manual order (drag an issue up to
   have it considered sooner).
 
-So a new issue filed mid-wave waits for the wave to end, and a clear title and description are what the orchestrator
+So a new issue can start as soon as a slot comes free, and a clear title and description are what the orchestrator
 orders work by.
 
 ## Issue properties and labels

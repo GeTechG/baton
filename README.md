@@ -5,13 +5,16 @@ tracker. Lific holds the issues and is the UI; baton decides **when** each issue
 the coding agent for it in a git worktree of your own checkout. It does not say how a repo is run: branches, PRs, CI,
 merging and who sets `done` come from the agents' instructions (`agents/*.json`) and the repo's own `AGENTS.md`.
 
-- **Waves:** humans file issues as `todo`. When no agent run is active, baton asks the orchestrator once: one model
-  call that sees the first `maxWave` (default 5, in the board's manual order: higher = first) not yet started `todo`
-  issues and every parked one, with their descriptions, footprints, blockers (each with its status: all closed, baton checked) and people's latest comments, the other open and recently closed issues,
-  every agent's name and description, and each project's `AGENTS.md`. It answers which issues start now and which
-  agent takes each; baton starts them and stays out of the way until every run has ended. It is asked again only
-  when something about the issues or the offer changed (a new comment from a person on a waiting issue counts). When it starts nothing, its one-line reason goes to `bridge.log`,
-  and since one wrong "nothing" would hold the queue until somebody touches an issue, it is asked again 1, then 5, then 15 minutes later
+- **Waves:** humans file issues as `todo`. Up to `maxWave` (default 5) issues are in work (`active`) at once; while
+  fewer are, baton asks the orchestrator to fill the free slots: one model call that sees the first `maxWave` (in the
+  board's manual order: higher = first) not yet started `todo` issues and every parked one that pass the hard gates
+  below (so none overlaps an issue in work), with their descriptions, footprints, blockers (each with its status: all closed, baton checked) and people's latest comments,
+  what is in work, the number of free slots, the other open and recently closed issues,
+  every agent's name and description, and each project's `AGENTS.md`. It answers which issues start now (at most one per
+  free slot) and which agent takes each; baton starts them. It is asked again only when a slot comes free (an issue in
+  work closes, goes to `in_review` or is parked) or something about the issues or the offer changed (a new comment from a person on a waiting issue counts), not every tick.
+  When it starts nothing, its one-line reason goes to `bridge.log`; if nothing is in work either,
+  one wrong "nothing" would hold the queue until somebody touches an issue, so it is asked again 1, then 5, then 15 minutes later
   (`waveRetrySec`, seconds; `[]` = never); after that its answer stands until something changes.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
   "blocked by" links, across projects too), the `needs-human` label, and a `footprint` property (Haiku-estimated if
