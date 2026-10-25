@@ -199,9 +199,9 @@ test('wave: one that started nothing is asked again after each pause, a limited 
 });
 
 test('wave: a waiting issue is shown with its blockers and their status, whatever its description says', () => {
-  const i = { ...issue('SPR-158', { fp: 'src/a.js', bb: ['SPR-157', 'LIB-3'] }, ['mobile']), title: 'Screen', description: 'Waits for SPR-157.' };
+  const i = { ...issue('APP-158', { fp: 'src/a.js', bb: ['APP-157', 'LIB-3'] }, ['mobile']), title: 'Screen', description: 'Waits for APP-157.' };
   assert.equal(offered(i, 'o/r', undefined, () => 'done'),
-    '## SPR-158 [o/r] Screen\nstatus: todo (not started); labels: mobile; footprint: src/a.js; blockers: SPR-157 (done), LIB-3 (done)\nWaits for SPR-157.');
+    '## APP-158 [o/r] Screen\nstatus: todo (not started); labels: mobile; footprint: src/a.js; blockers: APP-157 (done), LIB-3 (done)\nWaits for APP-157.');
   assert.equal(offered({ ...issue('OS-1', { fp: '' }), title: 'T', said: ['sergey: go'] }, 'o/r', { agent: 'worker' }, () => 'done'),
     '## OS-1 [o/r] T\nstatus: started earlier by worker, parked; labels: -; footprint: -; blockers: none\n' +
     '\nComments from people since (latest last; they may settle what the description leaves open):\n- sergey: go');
