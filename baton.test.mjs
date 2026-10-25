@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -253,4 +253,34 @@ test('cleanup kills what still runs in the worktree (cwd inside, or a path into 
     assert.ok(!gone(stray)); // outside the worktree: untouched
     assert.equal(reap(wt, 300), 0);
   } finally { try { process.kill(stray, 'SIGKILL'); } catch {} rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('milestone due: queue empty, base moved past the green commit, not tried yet, the last red fixed', () => {
+  assert.equal(milestoneDue(true, 'b', 'a', null, false), true);
+  assert.equal(milestoneDue(true, 'b', null, null, false), true); // no green commit yet
+  assert.equal(milestoneDue(false, 'b', 'a', null, false), false); // something runs or waits
+  assert.equal(milestoneDue(true, 'a', 'a', null, false), false); // green already
+  assert.equal(milestoneDue(true, 'b', 'a', 'b', false), false); // this commit was tried
+  assert.equal(milestoneDue(true, 'c', 'a', 'b', true), false); // an issue the last red filed is still open
+  assert.equal(milestoneDue(true, null, 'a', null, false), false); // origin unreadable
+});
+
+test('milestone red: stage labels, the bisect verdict, the stage output, the issue', () => {
+  const out = '\n▶ android build\nGradle: boom\n  ✗ android build (279 ms)\n\n▶ lint\n  ✓ lint (5 ms)\n' +
+    '──── summary ────\n  ✓ pass  lint\n  ✗ FAIL  android build\n  ✗ FAIL  render tier 2\n  ✗ FAIL  android build\n\nRED — 2 stage(s) failed\n';
+  assert.deepEqual(redStages(out, '✗ FAIL\\s+(.+)$'), ['android build', 'render tier 2']);
+  assert.deepEqual(redStages(out, undefined), []);
+  assert.equal(excerpt(out, 'android build'), '▶ android build\nGradle: boom\n  ✗ android build (279 ms)');
+  assert.equal(excerpt('a\nb', 'nope'), 'a\nb'); // not named: the tail
+  assert.deepEqual(culprit('bisect...\nfirst bad commit: 0123abcdef SPR-12: Faster sprites\n'), { sha: '0123abcdef', subject: 'SPR-12: Faster sprites', key: 'SPR-12' });
+  assert.equal(culprit('first bad commit: 0123abcdef no key').key, null);
+  assert.equal(culprit('no first bad commit found'), null);
+  const p = { base: 'master', milestone: { cmd: 'tools/check milestone', tag: 'gate/green' } };
+  const f = fixIssue(p, '9'.repeat(40), 'android build', { sha: '0123abcdef', subject: 'SPR-12: x', key: 'SPR-12' }, 'Gradle: boom', ['m.log', 'b.log']);
+  assert.equal(f.title, 'Milestone red: android build since 0123abcdef (SPR-12)');
+  assert.match(f.description, /first bad commit: 0123abcdef SPR-12: x\n- issue of that commit: SPR-12/);
+  assert.match(f.description, /`gate\/green` stays/);
+  assert.match(f.description, /Gradle: boom[\s\S]*Logs: m.log, b.log/);
+  assert.equal(fixIssue(p, '9'.repeat(40), 'lint', null, '', []).title, 'Milestone red: lint');
+  assert.match(fixIssue(p, '9'.repeat(40), null, null, 'timeout', ['m.log']).title, /without a red stage/);
 });

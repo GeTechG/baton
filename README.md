@@ -82,7 +82,7 @@ baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `s
 One entry in `config.json` `projects`, keyed by the Lific project name: `repo` and `base` (any branch; where the
 footprint tree and `AGENTS.md` are read from and what issue worktrees start at), and optionally `path` (your local
 checkout of the repo — issue worktrees are made from it; without it baton keeps its own clone under `state/src/`),
-`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `setup` and `instructions`.
+`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `setup`, `instructions` and `milestone`.
 
 `setup` is a shell command baton runs in an issue's worktree right after creating it, before the agent starts (so also
 after the `fresh` label; not on later runs in the kept worktree): what the repo needs before a session and its MCP
@@ -93,6 +93,25 @@ in `bridge.log`), and is parked; remove the label to try again. It runs inside b
 
 `instructions` is text for the agents of this project only: baton appends it to an agent's first prompt on the issue
 as a paragraph headed `Project guidance:`. The agents' own instructions stay project-independent.
+
+`milestone` is the gate of the merged tree, for a repo whose per-issue gate leaves some stages to it. baton runs it
+once the project's queue is empty (no agent run is active and no issue of the project waits to start) and `origin/<base>`
+has moved past the last green commit: `tag` if set (the command moves it on green, as Sprout's `tools/check milestone`
+moves `gate/green`), else the last commit baton saw green.
+```json
+"milestone": { "cmd": "tools/check milestone", "tag": "gate/green", "failed": "✗ FAIL\\s+(.+)$",
+               "bisect": "tools/gate-bisect \"$BATON_STAGE\"", "timeoutSec": 2400 }
+```
+It runs detached (the tick goes on; waves are not held) in a clean worktree `<worktrees>/_milestone` at that commit,
+after the project's `setup`, under `timeout timeoutSec` (default 2400). On a red exit, `failed` (a regex, capture group 1
+= the label of a red stage, one per line of the output) names the red stages; for each, baton runs `bisect` in the same
+worktree with `BATON_STAGE` set and the same time limit, reads the culprit from its line
+`first bad commit: <sha> <subject>`, and files one `todo` issue in the project: the stage, the first bad commit, the issue
+its subject names, the stage's part of the output (from its first mention to its next) and the log paths. No `bisect`:
+the issues have no culprit. A red exit that names no stage (a timeout is exit 124, a failed `setup`) files one issue with
+the tail of the output and `needs-human`. A commit is tried once; the next milestone waits until the base moves again and
+every issue the last red one filed is closed. Logs and state: `state/milestones/`, `state/milestones.json`;
+`bridge.log` has a `milestone <KEY> run|red|green|bisect|filed` line for each step.
 
 An agent run is `agent.cmd` in `config.json` (default: Claude Code, headless, stream-json into `state/logs/<KEY>.log`)
 plus `--model <the agent's model>`, `--session-id <uuid>` on the agent's first run on the issue or `--resume <uuid>`
@@ -106,4 +125,4 @@ and what not to do by hand. Install: `npx skills add GeTechG/baton` (add `-g` fo
 ## Tests
 - `node watch.mjs` — live view of what every running agent is doing (run it in a spare terminal pane);
   `node watch.mjs <KEY>` — the detailed view of one issue, from the start of its log.
-- `npm test` — pure logic (footprints, gates, run decisions, wave parsing).
+- `npm test` — pure logic (footprints, gates, run decisions, wave parsing, milestone decisions).
