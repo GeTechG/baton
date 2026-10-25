@@ -7,8 +7,9 @@
 // assigned to cfg.agent.user, its `agent` property names who holds it and its run log shows what the agent does).
 // Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, overlapping
 // `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
-// ponytail: prefix-match footprints, 100 open issues per project and status, one `issue get` per open issue per tick,
-// a run is "alive" while its pid exists (a reboot can recycle it), a worktree's processes are found in /proc (Linux only),
+// ponytail: prefix-match footprints (minus a project's sharedPaths), 100 open issues per project and status, one
+// `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
+// processes are found in /proc (Linux only),
 // one `comment list` per running issue per tick, a comment reaches a running agent only after its current tool call,
 // agents and the orchestrator run on the claude CLI only.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
@@ -54,7 +55,13 @@ const try_ = (f) => { try { return f(); } catch { return null; } };
 // punctuation stripped, prose (anything with a space) dropped.
 export const list = (s) => (s ?? '').split(/[,\n]/).map((x) => x.replace(/[`'"*]/g, '').trim().replace(/^- /, '').replace(/[.;:]+$/, ''))
   .filter((x) => x && !/\s/.test(x));
-export const overlaps = (a, b) => !a?.length || !b?.length || a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
+// A project's `sharedPaths` (each issue writes its own piece there, a rebase merges them) do not count on either side; a
+// footprint left with only them is empty, so it overlaps everything.
+export const overlaps = (a, b, shared = []) => {
+  const dir = (s) => s.replace(/\/+$/, ''), own = (fp) => (fp ?? []).filter((x) => !shared.some((s) => dir(x) === dir(s) || x.startsWith(`${dir(s)}/`)));
+  [a, b] = [own(a), own(b)];
+  return !a.length || !b.length || a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
+};
 // A tracker issue in the scheduler's terms: text property `footprint` (null = not set yet: baton estimates it), text
 // property `agent` (who holds it; an agent hands the issue on by naming another), native blockers, and Lific's `active`
 // under the name the rest of this file uses. notified = the human was already pinged.
@@ -86,11 +93,11 @@ export const agentPath = (bin, wt, path) => `${bin}:${wt}/node_modules/.bin:${pa
 // (an issue a human set `active` by hand).
 export const holder = (i, r, dflt = 'worker') => i.agent ?? r?.agent ?? dflt;
 // null = may start now; otherwise why not. flight = issues already held by agents or picked for this wave. statusOf(key) -> issue status.
-export function whyNot(i, flight, statusOf) {
+export function whyNot(i, flight, statusOf, shared = []) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
   if (open.length) return `blocked by ${open}`;
   if (i.labels.includes(CFG.humanLabel)) return CFG.humanLabel;
-  const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint));
+  const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint, shared));
   return clash ? `footprint overlaps ${clash.identifier}` : null;
 }
 // What the orchestrator decided on: the open issues and which of them were offered, in that order (a blocker closed in
@@ -481,7 +488,7 @@ function tick() {
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" in agents/`);
   const out = orchestrate(projects, issues, waiting, agents, o, runs, statusOf), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
-    const i = byKey[key], p = projects[i.project_id], why = whyNot(i, held, statusOf);
+    const i = byKey[key], p = projects[i.project_id], why = whyNot(i, held, statusOf, p.sharedPaths);
     if (why) { log(null, 'wait', key, why); continue; }
     if (freshStep(i, false, 0) === 'on-assign') restartFresh(p, i, runs);
     t('issue', 'update', key, '--status=active', `--assignee=${CFG.agent.user}`, `--set=agent=${agent}`); i.status = 'in_progress'; i.agent = agent;
