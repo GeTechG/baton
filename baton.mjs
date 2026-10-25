@@ -3,10 +3,10 @@
 // is in config.json ($BATON_CONFIG). Humans file issues as `todo`. While fewer than cfg.maxWave issues are in work, the
 // orchestrator (one model call) looks at the waiting issues and fills the free slots: which start now and which agent
 // (agents/*.json) takes each. baton alone moves an issue to `active`, gives it a git worktree off the project's local checkout and runs
-// the agent there (one worktree per issue, one session per agent on it, kept until the issue closes; the issue is
-// assigned to cfg.agent.user, its `agent` property names who holds it and its run log shows what the agent does).
-// Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, overlapping
-// `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
+// the agent there (one worktree per issue, one session per agent on it, kept until the issue closes; its `agent`
+// property names who holds it and its run log shows what the agent does).
+// Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, an assignment to a
+// person, overlapping `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
 // ponytail: prefix-match footprints (minus a project's sharedPaths), 100 open issues per project and status, one
 // `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
 // processes are found in /proc (Linux only),
@@ -97,6 +97,8 @@ export function whyNot(i, flight, statusOf, shared = []) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
   if (open.length) return `blocked by ${open}`;
   if (i.labels.includes(CFG.humanLabel)) return CFG.humanLabel;
+  // Lific's assignment: an issue nobody is assigned is the agents'; "any person" or named people keep it for humans.
+  if (i.needs_human || i.assignees?.length) return `for ${i.assignees?.length ? i.assignees.map((a) => `@${a.username}`) : 'a person'}`;
   const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint, shared));
   return clash ? `footprint overlaps ${clash.identifier}` : null;
 }
@@ -478,7 +480,7 @@ function tick() {
     const why = whyNot(i, [], statusOf) ?? (a ? null : `no agent "${name}"`), step = runStep(alive(r), why, r?.agent === name ? r.n : 0);
     if (step === 'park') {
       if (!a) { comment(i.identifier, `Bridge: this issue names the agent "${name}", which does not exist. Agents: ${agents.map((x) => x.name).join(', ')}.`); relabel(i.identifier, 'add', CFG.humanLabel); }
-      t('issue', 'update', i.identifier, '--status=todo', '--unassign'); i.status = 'todo';
+      t('issue', 'update', i.identifier, '--status=todo'); i.status = 'todo';
       if (r) { r.n = 0; saveRuns(runs); }
       log(null, 'park', i.identifier, why);
     } else if (step === 'stuck') {
@@ -512,7 +514,7 @@ function tick() {
     const i = byKey[key], p = projects[i.project_id], why = slots(issues) <= 0 ? 'no free slot' : whyNot(i, held, statusOf, p.sharedPaths);
     if (why) { log(null, 'wait', key, why); continue; }
     if (freshStep(i, false, 0) === 'on-assign') restartFresh(p, i, runs);
-    t('issue', 'update', key, '--status=active', `--assignee=${CFG.agent.user}`, `--set=agent=${agent}`); i.status = 'in_progress'; i.agent = agent;
+    t('issue', 'update', key, '--status=active', `--set=agent=${agent}`); i.status = 'in_progress'; i.agent = agent;
     log(null, 'assign', key, p.repo, '->', agent, `footprint=${i.footprint.join(',')}`);
     start(p, i, runs, agents.find((a) => a.name === agent));
     held.push(i);

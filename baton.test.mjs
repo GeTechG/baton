@@ -98,6 +98,12 @@ test('ready decision', () => {
   assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-12', 'OS-13'] }), [], statusOf), 'blocked by OS-12');
   assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-13'] }), [], statusOf), null);
   assert.equal(whyNot(issue('OS-5', { fp: 'src/d.js' }, ['gate:spec', 'needs-human']), [], statusOf), 'needs-human');
+  // Lific's assignment: unassigned is the agents'; any person or named people keep an issue for humans.
+  const t4 = issue('OS-6', { fp: 'src/e.js' });
+  assert.equal(whyNot({ ...t4, needs_human: false, assignees: [] }, [], statusOf), null);
+  assert.equal(whyNot({ ...t4, needs_human: true }, [], statusOf), 'for a person');
+  assert.equal(whyNot({ ...t4, needs_human: true, assignees: [{ username: 'kit' }, { username: 'ann' }] }, [], statusOf), 'for @kit,@ann');
+  assert.equal(runStep(false, whyNot({ ...t4, needs_human: true }, [], statusOf), 0, 3), 'park');
 });
 
 test('human notification fires once per needs-human episode', () => {

@@ -47,6 +47,7 @@ now and which agent takes each. An issue can be picked only when all of these ho
 - its status is `todo` (`backlog` = not ready, a human moves it; `in_review` waits for a review, not an agent),
 - every issue that blocks it is done (links work across projects),
 - it has no `needs-human` label,
+- it is not assigned to a person (`--assign human` or usernames keep an issue for people; unassigned is the agents'),
 - its `footprint` does not overlap an issue of the same project that is `active` or `in_review` (path-prefix match),
 - if it has not been started yet, it is among the first few such issues in the board's manual order (drag an issue up to
   have it considered sooner).
@@ -87,7 +88,7 @@ lific issue update <KEY> --add-label needs-human         # park for a human
 Add `--json` for scripts. Against a running server pass `--backend http` with `LIFIC_URL` and `LIFIC_API_KEY` set
 (agents started by baton get a `lific` on their PATH that already does).
 
-To see what the system is doing: the issue's run log and assignee in the tracker UI; in the baton checkout `node watch.mjs`
+To see what the system is doing: the issue's run log and `agent` in the tracker UI; in the baton checkout `node watch.mjs`
 (live view of the agent runs), `state/bridge.log` (every wave / assign / run / park decision), `state/logs/<KEY>.log` (an
 issue's raw agent output), `scripts/status.sh`.
 

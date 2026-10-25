@@ -18,7 +18,8 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   one wrong "nothing" would hold the queue until somebody touches an issue, so it is asked again 1, then 5, then 15 minutes later
   (`waveRetrySec`, seconds; `[]` = never); after that its answer stands until something changes.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
-  "blocked by" links, across projects too), the `needs-human` label, and a `footprint` property (Haiku-estimated if
+  "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
+  named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (Haiku-estimated if
   missing) that overlaps an issue of the same project that is `active` or `in_review`.
 - **Agents:** one JSON file each (`name`, `model`, `description`, `instructions`) in `agents/` — `worker`, a
   project-independent worker that takes the process from the repo's `AGENTS.md`, and `orchestrator` — plus your own in
@@ -40,8 +41,8 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   `PostToolUse` and `Stop`, on top of the repo's own hooks) shows it to the agent after its current tool call, or keeps
   it from ending its turn before it has read it (`bridge.log`: `tell <KEY> <n> comment`). A sub-agent's tool calls leave it
   to the main agent. A comment made while no run is active is read by the next run, as before.
-  `in_review` waits for a review, not for an agent: baton leaves it alone and keeps its footprint reserved. While an issue runs it is assigned to the agents' tracker user
-  (`agent.user`, default `agent`) and its run log in the tracker shows, a tick behind, what the agent is doing.
+  `in_review` waits for a review, not for an agent: baton leaves it alone and keeps its footprint reserved. While an issue runs
+  its run log in the tracker shows, a tick behind, what the agent is doing.
 - **Hand-offs:** the issue's `agent` property names the agent that holds it. baton sets it when it starts the issue;
   an agent passes the issue on with `lific issue update <KEY> --set agent=<name>` when the repo's rules say so, and the
   next run is that agent's (a new session in the same worktree).
@@ -52,7 +53,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 
 ## Run
 1. Lific: put the binary at `bin/lific` (it must be built from the `baton-features` branch of the fork: `in_review` status, issue properties,
-   assignee, run log, `issue update --add-label/--remove-label`, `issue link` — none of it is upstream), `bin/lific init` (config, database, your admin account, a user service on
+   run log, `issue update --add-label/--remove-label`, `issue link` defaulting to `blocks` — none of it is upstream), `bin/lific init` (config, database, your admin account, a user service on
    `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human` and `fresh` in each, and two bot users with an API key each
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
 2. `.env` (gitignored): `LIFIC_API_KEY=` baton's key, `AGENT_LIFIC_API_KEY=` the agents' key, `AGENT_GH_TOKEN=` the
