@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offer, slots, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -354,4 +354,11 @@ test('milestone red: stage labels, the bisect verdict, the stage output, the iss
   assert.match(f.description, /compile error: boom[\s\S]*Logs: m.log, b.log/);
   assert.equal(fixIssue(p, '9'.repeat(40), 'lint', null, '', []).title, 'Milestone red: lint');
   assert.match(fixIssue(p, '9'.repeat(40), null, null, 'timeout', ['m.log']).title, /without a red stage/);
+});
+
+test('a one-shot model call has no tools and no MCP servers, so its single turn is the answer', () => {
+  const a = oneShot('haiku');
+  assert.deepEqual(a.slice(0, 5), ['-p', '--model', 'haiku', '--max-turns', '1']);
+  assert.equal(a[a.indexOf('--tools') + 1], '');
+  assert.ok(a.includes('--strict-mcp-config'));
 });

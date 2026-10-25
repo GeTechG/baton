@@ -344,11 +344,14 @@ function restartFresh(p, i, runs) {
   log(null, 'fresh', i.identifier, 'next run starts with a new session and worktree', ...killed);
 }
 
+// argv of a one-shot model call (footprint, orchestrator): no tools and no MCP servers, so the one turn is the answer.
+// With tools the model may spend it on a look around and `claude -p` exits 1 with "Reached max turns".
+export const oneShot = (model) => ['-p', '--model', model, '--max-turns', '1', '--tools', '', '--strict-mcp-config'];
 function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
   const files = repoMap(gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path').split('\n'));
   const prompt = `Repo paths:\n${files}\n\nTask:\n${i.title}\n${i.description ?? ''}\n\n${p.footprintHint ?? ''}\n` +
     'Reply with ONLY a comma-separated list of repo paths this task will create or edit.';
-  const out = execFileSync('claude', ['-p', '--model', 'haiku', '--max-turns', '1'], { input: prompt, encoding: 'utf8' }).trim(); // stdin: argv has a size limit
+  const out = execFileSync('claude', oneShot('haiku'), { input: prompt, encoding: 'utf8' }).trim(); // stdin: argv has a size limit
   const fp = list(out);
   t('issue', 'update', i.identifier, `--set=footprint=${fp.join(', ')}`);
   log(null, 'footprint', i.identifier, fp.join(', '));
@@ -378,7 +381,7 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room)
     `# Recently closed\n${closed.map(line).join('\n') || '-'}\n\n` +
     (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
     'Reply with ONLY one line per task to start: `<KEY> <agent name>`. No other text. If you start nothing, reply with one line saying why.';
-  return execFileSync('claude', ['-p', '--model', o.model || 'sonnet', '--max-turns', '1'], { input: prompt, encoding: 'utf8' });
+  return execFileSync('claude', oneShot(o.model || 'sonnet'), { input: prompt, encoding: 'utf8' });
 }
 
 // ---- p.milestone: one job at a time per project, detached under `timeout`: the milestone in a clean worktree at
