@@ -52,7 +52,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 - **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both, stops the worktree's processes as on close, and removes the label; unpushed work in the old worktree is lost).
 
 ## Run
-1. Lific: put the binary at `bin/lific` (it must be built from the `baton-features` branch of the fork: `in_review` status, issue properties,
+1. Lific: put the binary at `bin/lific` (it must be built from `master` of the fork, GeTechG/lific: `in_review` status, issue properties,
    run log, `issue update --add-label/--remove-label`, `issue link` defaulting to `blocks` — none of it is upstream), `bin/lific init` (config, database, your admin account, a user service on
    `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human` and `fresh` in each, and two bot users with an API key each
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
