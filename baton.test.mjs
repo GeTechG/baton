@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -262,13 +262,40 @@ test('wave: the orchestrator sees what people commented, not the agents, latest 
   assert.deepEqual(said([], 'agent'), []);
 });
 
-test('a running agent hears comments newer than the last one it saw, not its own, oldest first', () => {
-  const c = (id, author, content) => ({ id, author, content });
-  const cs = [c(9, 'sergey', 'also X'), c(8, 'agent', 'PR opened'), c(7, 'sergey', 'use Y'), c(5, 'sergey', 'old')];
-  assert.deepEqual(news(cs, 5, 'agent'), { since: 9, said: ['sergey: use Y', 'sergey: also X'] });
-  assert.deepEqual(news([c(8, 'agent', 'PR opened')], 7, 'agent'), { since: 8, said: [] }); // its own comment only moves `since`
-  assert.deepEqual(news(cs, 9, 'agent'), { since: 9, said: [] });
-  assert.deepEqual(news([], 0, 'agent'), { since: 0, said: [] });
+test('a running agent hears comments newer than the last one it saw, not its own run\'s, oldest first', () => {
+  const c = (id, author, content) => ({ id, author, content }), me = runMark('OS-1', 3);
+  const cs = [c(9, 'sergey', 'also X'), c(8, 'agent', `PR opened\n\n${me}`), c(7, 'sergey', 'use Y'), c(5, 'sergey', 'old')];
+  assert.deepEqual(news(cs, 5, me, 'agent'), { since: 9, said: ['sergey: use Y', 'sergey: also X'] });
+  assert.deepEqual(news([c(8, 'agent', `PR opened\n\n${me}`)], 7, me, 'agent'), { since: 8, said: [] }); // its own comment only moves `since`
+  assert.deepEqual(news(cs, 9, me, 'agent'), { since: 9, said: [] });
+  assert.deepEqual(news([], 0, me, 'agent'), { since: 0, said: [] });
+  // the agents share one tracker user: another issue's agent, or an earlier run of this one, is heard
+  const other = c(10, 'agent', `not needed, cancelled\n\n${runMark('SPR-2', 1)}`);
+  assert.deepEqual(news([other], 9, me, 'agent').said, [`agent: ${other.content}`]);
+  assert.deepEqual(news([c(10, 'agent', `x\n\n${runMark('OS-1', 2)}`), c(11, 'agent', 'unmarked')], 9, me, 'agent').said.length, 2);
+  assert.notEqual(news([c(10, 'agent', `x\n\n${runMark('OS-1', 31)}`)], 9, me, 'agent').said.length, 0); // run 31 is not run 3
+  assert.equal(news([c(10, 'sergey', `quoting ${me}`)], 9, me, 'agent').said.length, 1); // a person is always heard
+});
+
+test('agents\' lific: marks the content of comment add, in every spelling, and nothing else', () => {
+  const m = '<!-- m -->', x = 'hi\n\n<!-- m -->';
+  assert.deepEqual(marked(['comment', 'add', 'OS-1', '--content=hi'], m), ['comment', 'add', 'OS-1', `--content=${x}`]);
+  assert.deepEqual(marked(['comment', 'add', '--content', 'hi', 'OS-1'], m), ['comment', 'add', '--content', x, 'OS-1']);
+  assert.deepEqual(marked(['--json', 'comment', 'add', 'OS-1', '-c', 'hi'], m), ['--json', 'comment', 'add', 'OS-1', '-c', x]);
+  assert.deepEqual(marked(['comment', 'add', 'OS-1', '-chi'], m), ['comment', 'add', 'OS-1', `-c${x}`]);
+  assert.deepEqual(marked(['comment', 'list', 'OS-1', '-c', 'hi'], m), ['comment', 'list', 'OS-1', '-c', 'hi']);
+  assert.deepEqual(marked(['issue', 'create', '--description=hi'], m), ['issue', 'create', '--description=hi']);
+  assert.deepEqual(marked(['comment', 'add', 'OS-1', '--content=hi'], undefined), ['comment', 'add', 'OS-1', '--content=hi']); // not in a run
+});
+
+test('agents\' lific wrapper: runs the tracker CLI on the HTTP backend with the run\'s mark, passes its exit code', async () => {
+  const { mkdtempSync, writeFileSync, chmodSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { spawnSync } = await import('node:child_process');
+  const dir = mkdtempSync(`${tmpdir()}/baton-lific-`), fake = `${dir}/real-lific`, wrap = `${dir}/lific`;
+  writeFileSync(fake, `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 3;\n`); chmodSync(fake, 0o755);
+  writeFileSync(wrap, lificWrapper(process.execPath, fake)); chmodSync(wrap, 0o755);
+  const r = spawnSync(wrap, ['comment', 'add', 'OS-1', '--content=it\'s "done"'], { env: { BATON_RUN: runMark('OS-1', 2) }, encoding: 'utf8' });
+  assert.equal(r.status, 3);
+  assert.deepEqual(JSON.parse(r.stdout), ['--backend', 'http', 'comment', 'add', 'OS-1', '--content=it\'s "done"\n\n<!-- baton OS-1 run 2 -->']);
 });
 
 test('inbox hook: hands the inbox to the main agent once (exit 2, stderr), leaves it to no sub-agent', async () => {

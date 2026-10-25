@@ -150,11 +150,28 @@ export function picks(out, keys, agents) {
 }
 // Why a wave came out empty, for the log: the orchestrator's reply on one line, capped.
 export const reason = (out) => out.replace(/\s+/g, ' ').trim().slice(0, 300) || 'empty reply';
+// A run's own comments: the agents share one tracker user, so the author does not tell them apart. baton's `lific` wrapper
+// appends the run's mark ($BATON_RUN) to every comment it adds, an HTML comment rendered markdown does not show.
+export const runMark = (key, n) => `<!-- baton ${key} run ${n} -->`;
+// `lific` arguments with `mark` appended to the content of a `comment add` (--content X, --content=X, -c X, -cX); any other command as it is.
+export function marked(args, mark) {
+  const at = args.findIndex((a, k) => a === 'comment' && args[k + 1] === 'add'), add = (a) => `${a}\n\n${mark}`;
+  if (!mark || at < 0) return args;
+  return args.map((a, k) => (k < at + 2 ? a : ['--content', '-c'].includes(args[k - 1]) || /^(--content=|-c.)/.test(a) ? add(a) : a));
+}
+// The agents' `lific` (a script for `node`): the tracker CLI on the HTTP backend (URL and key come from the env), comments marked.
+export const lificWrapper = (node, bin) => `#!${node}
+${marked}
+const r = require('child_process').spawnSync(${JSON.stringify(bin)}, ['--backend', 'http', ...marked(process.argv.slice(2), process.env.BATON_RUN)], { stdio: 'inherit' });
+if (r.error) console.error(r.error.message);
+process.exitCode = r.status ?? 1;
+`;
 // What a running agent hears (r.heard = the newest comment id it has seen or was told of): the comments on its issue newer
-// than `since`, not by the agents' tracker user, oldest first -> { since, said }. Its own comments only move `since`.
-export function news(comments, since, bot = CFG.agent.user) {
+// than `since`, oldest first -> { since, said }. Its own comments (the agents' user, its run's mark) only move `since`;
+// one by the agent of another issue is heard like a person's.
+export function news(comments, since, mark, bot = CFG.agent.user) {
   const fresh = comments.filter((c) => c.id > since).sort((a, b) => a.id - b.id);
-  return { since: Math.max(since, ...fresh.map((c) => c.id)), said: fresh.filter((c) => c.author !== bot).map((c) => `${c.author}: ${c.content}`) };
+  return { since: Math.max(since, ...fresh.map((c) => c.id)), said: fresh.filter((c) => !(c.author === bot && c.content.includes(mark))).map((c) => `${c.author}: ${c.content}`) };
 }
 // The runs' Claude Code hook (PostToolUse, Stop), a script for `node`: the inbox $BATON_INBOX, if any, goes to the model
 // (exit 2 puts stderr in front of it; on Stop it also keeps the turn going) and is gone. A sub-agent's tool call (agent_id
@@ -303,7 +320,8 @@ function start(p, i, runs, a) {
   const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
   r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
   const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, '--settings', HOOKS, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
-    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH), BATON_INBOX: inbox(i.identifier) }) });
+    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH), BATON_INBOX: inbox(i.identifier),
+      BATON_ISSUE: i.identifier, BATON_RUN: runMark(i.identifier, (r.total ?? 0) + 1) }) });
   child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
   if (CFG.herdr) try { watchTab(i.identifier, r); } catch (e) { log('herdr', 'herdr tab failed', e.message.split('\n')[0]); }
   child.unref(); r.pid = child.pid; r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off, review or park; total names the run
@@ -327,7 +345,7 @@ function listen(runs) {
   for (const [key, r] of Object.entries(runs).filter(([, x]) => x.heard != null && alive(x))) {
     const cs = try_(() => tj('comment', 'list', key, '--limit', '50'));
     if (!cs) continue;
-    const { since, said } = news(cs, r.heard);
+    const { since, said } = news(cs, r.heard, runMark(key, r.total));
     if (since === r.heard) continue;
     if (said.length) {
       mkdirSync(`${DIR}/inbox`, { recursive: true });
@@ -528,12 +546,12 @@ function tick() {
   last = { snap: snapshot(issues, offering()), empties: busy() ? 0 : (same ? last.empties : 0) + 1, at: Date.now() };
 }
 
-// Agents call the tracker as plain `lific …`: a wrapper on their PATH pins the HTTP backend (URL and key come from the env).
+// Agents call the tracker as plain `lific …`: a wrapper on their PATH (lificWrapper) pins the HTTP backend and marks their comments.
 // baton-inbox.cjs is the runs' hook (inboxHook), passed with --settings so it adds to the repo's own hooks.
 const HOOKS = JSON.stringify({ hooks: Object.fromEntries(['PostToolUse', 'Stop'].map((e) => [e, [{ hooks: [{ type: 'command', command: `"${DIR}/bin/baton-inbox.cjs"` }] }]])) });
 function agentBin() {
   mkdirSync(`${DIR}/bin`, { recursive: true });
-  writeFileSync(`${DIR}/bin/lific`, `#!/bin/sh\nexec "${CFG.lific.bin}" --backend http "$@"\n`); chmodSync(`${DIR}/bin/lific`, 0o755);
+  writeFileSync(`${DIR}/bin/lific`, lificWrapper(process.execPath, CFG.lific.bin)); chmodSync(`${DIR}/bin/lific`, 0o755);
   writeFileSync(`${DIR}/bin/baton-inbox.cjs`, inboxHook(process.execPath)); chmodSync(`${DIR}/bin/baton-inbox.cjs`, 0o755);
 }
 const loop = async () => {

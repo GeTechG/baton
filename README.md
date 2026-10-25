@@ -37,10 +37,13 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   every process still running in it (cwd inside the worktree or a path into it on the command line: the agent's
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
   **Talking to a running agent:** comment on its issue. baton checks the comments of every running issue each tick;
-  a new one not by the agents' user goes to `state/inbox/<KEY>`, and a hook baton adds to the run (`--settings`:
+  a new one goes to `state/inbox/<KEY>` unless the run itself wrote it, and a hook baton adds to the run (`--settings`:
   `PostToolUse` and `Stop`, on top of the repo's own hooks) shows it to the agent after its current tool call, or keeps
   it from ending its turn before it has read it (`bridge.log`: `tell <KEY> <n> comment`). A sub-agent's tool calls leave it
-  to the main agent. A comment made while no run is active is read by the next run, as before.
+  to the main agent. A comment made while no run is active is read by the next run, as before. All agents share one tracker
+  user, so a run's own comments are told apart by a mark: baton's `lific` wrapper appends `<!-- baton <KEY> run <n> -->`
+  (`$BATON_RUN`) to the content of every `comment add` of the run. A comment by the agent of another issue (or an earlier
+  run of this one) reaches the run like a person's.
   `in_review` waits for a review, not for an agent: baton leaves it alone and keeps its footprint reserved. While an issue runs
   its run log in the tracker shows, a tick behind, what the agent is doing.
 - **Hand-offs:** the issue's `agent` property names the agent that holds it. baton sets it when it starts the issue;
@@ -58,7 +61,8 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
 2. `.env` (gitignored): `LIFIC_API_KEY=` baton's key, `AGENT_LIFIC_API_KEY=` the agents' key, `AGENT_GH_TOKEN=` the
    GitHub token agents push with. Every `AGENT_X` reaches the agent processes as `X`; baton itself uses the machine's `gh` login.
-   An agent's `PATH` starts with baton's `lific` wrapper and its worktree's `node_modules/.bin`.
+   An agent's `PATH` starts with baton's `lific` wrapper (the HTTP backend, comments marked with the run) and its worktree's `node_modules/.bin`;
+   its env has `BATON_ISSUE` (its issue key) and `BATON_RUN`.
 3. Write `config.json` (gitignored):
    ```json
    {
