@@ -87,7 +87,12 @@ baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `s
 One entry in `config.json` `projects`, keyed by the Lific project name: `repo` and `base` (any branch; where the
 footprint tree and `AGENTS.md` are read from and what issue worktrees start at), and optionally `path` (your local
 checkout of the repo — issue worktrees are made from it; without it baton keeps its own clone under `state/src/`),
-`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `setup`, `instructions` and `milestone`.
+`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `sharedPaths`, `setup`, `instructions` and `milestone`.
+
+`sharedPaths` lists paths nearly every issue names but writes only its own piece of (its own folder under them, its own
+line in a shared file), so a rebase merges the edits, e.g. `["openspec/", "docs/tech-debt.md"]`. When footprints are
+compared, a path in the list or under it does not count on either side; a footprint left with only shared paths counts
+as empty (it overlaps everything).
 
 `setup` is a shell command baton runs in an issue's worktree right after creating it, before the agent starts (so also
 after the `fresh` label; not on later runs in the kept worktree): what the repo needs before a session and its MCP

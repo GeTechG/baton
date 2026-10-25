@@ -73,6 +73,17 @@ test('overlaps: path prefix, directory, disjoint, empty is conservative', () => 
   assert.ok(overlaps([], ['src/a.js']));
 });
 
+test('overlaps: shared paths count on neither side, only shared paths is empty', () => {
+  const shared = ['openspec/', 'docs/tech-debt.md'];
+  const a = ['openspec/changes/a/', 'docs/tech-debt.md', 'src/a.js'], b = ['openspec', 'docs/tech-debt.md', 'src/b.js'];
+  assert.ok(overlaps(a, b));
+  assert.ok(!overlaps(a, b, shared));
+  assert.ok(!overlaps(['docs/', 'src/a.js'], ['docs/tech-debt.md', 'src/b.js'], shared));
+  assert.ok(overlaps(['docs/'], ['docs/other.md', 'src/b.js'], shared));
+  assert.ok(overlaps(['openspec/changes/a/', 'docs/tech-debt.md'], ['src/b.js'], shared));
+  assert.ok(overlaps(['openspecs/x.md'], ['src/b.js', 'openspecs/'], shared)); // a sibling is not under openspec/
+});
+
 test('ready decision', () => {
   const t1 = issue('OS-1', { fp: 'src/a.js, test/greet.test.js' });
   const t3 = issue('OS-3', { fp: 'src/a.js, test/hello.test.js' });
@@ -83,6 +94,7 @@ test('ready decision', () => {
   assert.equal(whyNot(t2, [t1], statusOf), null);
   assert.equal(whyNot(lib, [t1], statusOf), null); // same path, other project
   assert.equal(whyNot(t3, [t1], statusOf), 'footprint overlaps OS-1');
+  assert.equal(whyNot(t3, [t1], statusOf, ['src/a.js']), null);
   assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-12', 'OS-13'] }), [], statusOf), 'blocked by OS-12');
   assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-13'] }), [], statusOf), null);
   assert.equal(whyNot(issue('OS-5', { fp: 'src/d.js' }, ['gate:spec', 'needs-human']), [], statusOf), 'needs-human');
