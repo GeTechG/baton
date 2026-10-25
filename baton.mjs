@@ -11,6 +11,7 @@
 // a run is "alive" while its pid exists (a reboot can recycle it), a worktree's processes are found in /proc (Linux only),
 // agents and the orchestrator run on the claude CLI only.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
+// cfg.projects.*.milestone: once a project's queue is empty, the gate of its merged tree runs; a red stage is bisected and filed as todo.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -155,6 +156,32 @@ export function setup(p, key, wt, src) {
   } catch (e) { return (e.stdout?.trim() || e.message).slice(-1500); }
 }
 
+// p.milestone: the gate of the merged tree, run by baton once the project's queue is empty. Due when nothing runs and
+// nothing of the project waits, the base has moved past the last green commit, this commit was not tried yet and every
+// issue the last red milestone filed is closed (a fix has landed, so the next try is not the same red again).
+export const milestoneDue = (idle, head, green, tried, open) => idle && !!head && head !== green && head !== tried && !open;
+// The labels of the red stages in a milestone's output: capture group 1 of `re` (p.milestone.failed), each once.
+export const redStages = (out, re) => (re ? [...new Set([...out.matchAll(new RegExp(re, 'gm'))].map((m) => m[1].trim()))] : []);
+// The bisect's verdict: git bisect's own line `<sha> is the first bad commit`; key = the issue the commit's subject names.
+export function culprit(out, subjectOf) {
+  const sha = /\b([0-9a-f]{7,40}) is the first bad commit\b/.exec(out)?.[1], subject = sha && (subjectOf(sha) ?? '').trim();
+  return sha ? { sha, subject, key: /\b[A-Z][A-Z0-9]*-\d+\b/.exec(subject)?.[0] ?? null } : null;
+}
+// What the output says about one stage: from the first line naming it to the next one (its header and result), capped.
+export function excerpt(out, stage, max = 3000) {
+  const lines = out.split('\n'), a = lines.findIndex((l) => l.includes(stage)), b = lines.findIndex((l, n) => n > a && l.includes(stage));
+  return (a < 0 ? lines.slice(-40) : lines.slice(a, b < 0 ? a + 40 : b + 1)).join('\n').slice(-max);
+}
+// The todo issue for one red stage (stage = null: the milestone failed without naming one: a timeout, a setup error).
+export function fixIssue(p, sha, stage, c, text, logs) {
+  const m = p.milestone, at = `\`${m.cmd}\` failed on ${sha.slice(0, 10)} (origin/${p.base})`;
+  if (!stage) return { title: `Milestone gate failed on ${sha.slice(0, 10)} without a red stage`, description: `${at} and named no red stage.\n\nIts last output:\n\n\`\`\`\n${text}\n\`\`\`\n\nLog: ${logs.join(', ')}` };
+  return { title: `Milestone red: ${stage}${c ? ` since ${c.sha.slice(0, 10)}${c.key ? ` (${c.key})` : ''}` : ''}`,
+    description: `${at}${m.tag ? `; \`${m.tag}\` stays where it is until a milestone is green` : ''}.\n\n- stage: ${stage}\n` +
+      `- first bad commit: ${c ? `${c.sha} ${c.subject}` : 'not found by the bisect'}\n- issue of that commit: ${c?.key ?? '-'}\n\n` +
+      `Stage output:\n\n\`\`\`\n${text}\n\`\`\`\n\nLogs: ${logs.join(', ')}` };
+}
+
 // ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, agent, session, wt, n, total, pos } } ----
 const RUNS = `${DIR}/runs.json`;
 const loadRuns = () => try_(() => JSON.parse(readFileSync(RUNS, 'utf8'))) ?? {};
@@ -173,9 +200,10 @@ function source(p) {
   if (!existsSync(dir)) run('git', ['clone', '-q', `https://github.com/${p.repo}.git`, dir]);
   return dir;
 }
+const wtDir = (p, src, name) => resolve(p.worktrees ? resolve(ROOT, p.worktrees) : `${src}.wt`, name);
 // null = p.setup failed: no worktree is left (the next attempt makes and prepares a new one) and the issue waits for a human.
 function worktree(p, key) { // detached at origin/<base>; the agent creates or checks out its own branch
-  const src = source(p), wt = resolve(p.worktrees ? resolve(ROOT, p.worktrees) : `${src}.wt`, key), git = (...a) => run('git', ['-C', src, ...a]);
+  const src = source(p), wt = wtDir(p, src, key), git = (...a) => run('git', ['-C', src, ...a]);
   if (existsSync(wt)) return wt;
   git('fetch', '-q', 'origin'); git('worktree', 'prune');
   git('worktree', 'add', '-q', '--detach', wt, `origin/${p.base}`);
@@ -292,6 +320,62 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf) {
   return execFileSync('claude', ['-p', '--model', o.model || 'sonnet', '--max-turns', '1'], { input: prompt, encoding: 'utf8' });
 }
 
+// ---- p.milestone: one job at a time per project, detached under `timeout`: the milestone in a clean worktree at
+// origin/<base>, then p.milestone.bisect once per red stage; each red stage = one todo issue. Logs in state/milestones/,
+// state in state/milestones.json = { <project key>: { sha, good, tried, green, filed, wt, pid, log, mlog, stage, queue } }. ----
+const MS = `${DIR}/milestones.json`, fetched = {}; // fetched: project key -> when origin was last fetched for it
+function job(p, m, src, cmd, name, extra = {}) {
+  mkdirSync(`${DIR}/milestones`, { recursive: true });
+  m.log = `${DIR}/milestones/${name}.log`; rmSync(`${m.log}.exit`, { force: true });
+  const out = openSync(m.log, 'w'), child = spawn('sh', ['-c', 'timeout -k 30 "$0" sh -c "$1"; echo $? > "$2"', String(p.milestone.timeoutSec ?? 2400), cmd, `${m.log}.exit`],
+    { cwd: m.wt, detached: true, stdio: ['ignore', out, out], env: { ...process.env, BATON_SOURCE: src, BATON_ISSUE: 'milestone', ...extra } });
+  child.unref(); m.pid = child.pid;
+}
+function dropMilestoneTree(m, src) {
+  if (!m.wt) return;
+  reap(m.wt); try_(() => run('git', ['-C', src, 'worktree', 'remove', '--force', m.wt])); rmSync(m.wt, { recursive: true, force: true });
+}
+// A job ended: file what it found, start the next bisect or drop the worktree.
+function settle(p, m, src) {
+  const read = (f) => try_(() => readFileSync(f, 'utf8')) ?? '', out = read(m.log), code = Number(read(`${m.log}.exit`).trim() || NaN);
+  const file = (stage, c, text, logs) => {
+    const { title, description } = fixIssue(p, m.sha, stage, c, text, logs);
+    const k = tj('issue', 'create', '--project', p.key, '--status=todo', `--title=${title}`, `--description=${description}`, ...(stage ? [] : [`--labels=${CFG.humanLabel}`])).identifier;
+    m.filed.push(k); log(null, 'milestone', p.key, 'filed', k, stage ?? `exit ${code}`);
+  };
+  m.pid = null;
+  if (m.stage == null) {
+    m.mlog = m.log;
+    if (code === 0) { m.green = m.sha; log(null, 'milestone', p.key, 'green', m.sha.slice(0, 10)); } else {
+      m.queue = redStages(out, p.milestone.failed);
+      log(null, 'milestone', p.key, 'red', m.sha.slice(0, 10), `exit ${code}`, m.queue.join(', ') || 'no red stage');
+      if (!m.queue.length) file(null, null, out.split('\n').slice(-40).join('\n').slice(-3000), [m.log]);
+      else if (!p.milestone.bisect || !m.good) m.queue = (m.queue.forEach((s) => file(s, null, excerpt(out, s), [m.log])), []);
+    }
+  } else file(m.stage, culprit(out, (sha) => try_(() => run('git', ['-C', src, 'log', '-1', '--format=%s', sha]))), excerpt(read(m.mlog), m.stage), [m.mlog, m.log]);
+  if (m.queue?.length) {
+    m.stage = m.queue.shift();
+    job(p, m, src, p.milestone.bisect, `${p.key}-bisect-${m.queue.length}`, { BATON_STAGE: m.stage, BATON_BAD: m.sha, BATON_GOOD: m.good ?? '' });
+    log(null, 'milestone', p.key, 'bisect', m.stage, `pid ${m.pid}`);
+  } else { m.stage = null; dropMilestoneTree(m, src); }
+}
+function milestones(projects, idle, statusOf) {
+  const ms = try_(() => JSON.parse(readFileSync(MS, 'utf8'))) ?? {}, save = () => writeFileSync(MS, JSON.stringify(ms));
+  for (const p of Object.values(projects).filter((x) => x.milestone)) {
+    const m = ms[p.key] ??= {}, src = source(p), git = (...a) => try_(() => run('git', ['-C', src, ...a]));
+    if (m.pid) { if (!alive(m)) { settle(p, m, src); save(); } continue; }
+    if (!idle(p) || Date.now() - (fetched[p.key] ?? 0) < 60000) continue;
+    fetched[p.key] = Date.now(); git('fetch', '-q', 'origin');
+    const head = git('rev-parse', `origin/${p.base}`), green = p.milestone.tag ? git('rev-parse', '-q', '--verify', `refs/tags/${p.milestone.tag}^{commit}`) : m.green;
+    if (!milestoneDue(true, head, green, m.tried, (m.filed ?? []).some((k) => !CLOSED.includes(statusOf(k))))) continue;
+    Object.assign(m, { sha: head, good: green, tried: head, filed: [], queue: [], stage: null, wt: wtDir(p, src, '_milestone') });
+    dropMilestoneTree(m, src); git('worktree', 'prune'); run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', m.wt, head]);
+    job(p, m, src, p.setup ? `(${p.setup}\n) && ${p.milestone.cmd}` : p.milestone.cmd, `${p.key}-milestone`);
+    log(null, 'milestone', p.key, 'run', head.slice(0, 10), green ? `${p.milestone.tag ?? 'green'} at ${green.slice(0, 10)}` : 'no green commit yet', `pid ${m.pid}`);
+    save();
+  }
+}
+
 let last = { snap: null, empties: 0, at: 0 }; // the last wave: what it was decided on, how many in a row started nothing, when
 function tick() {
   const runs = loadRuns(), { o, agents } = team(loadAgents(), CFG.orchestrator), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
@@ -351,6 +435,8 @@ function tick() {
   const held = issues.filter(flying);
   const free = issues.filter((x) => x.status === 'todo' && !whyNot(x, [], statusOf));
   const waiting = [...free.filter((x) => runs[x.identifier]), ...free.filter((x) => !runs[x.identifier]).slice(0, CFG.maxWave)];
+  // The milestone does not hold the waves: it runs detached, and only while the project has nothing running or waiting.
+  milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !waiting.some((x) => projects[x.project_id] === p), statusOf);
   if (!waiting.length) return;
   for (const i of waiting) { i.footprint ??= estimateFootprint(projects[i.project_id], i); i.said = said(tj('comment', 'list', i.identifier)); }
   const same = snapshot(issues, waiting) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
