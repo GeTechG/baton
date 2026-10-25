@@ -16,7 +16,7 @@
 // cfg.projects.*.milestone: once a project's queue is empty, the gate of its merged tree runs; a red stage is bisected and filed as todo.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,7 +159,7 @@ export function marked(args, mark) {
   if (!mark || at < 0) return args;
   return args.map((a, k) => (k < at + 2 ? a : ['--content', '-c'].includes(args[k - 1]) || /^(--content=|-c.)/.test(a) ? add(a) : a));
 }
-// The agents' `lific` (a script for `node`): the tracker CLI on the HTTP backend (URL and key come from the env), comments marked.
+// The agents' `lific` (a CommonJS script for `node`, saved as .cjs: state/ is under baton's "type": "module"): the tracker CLI on the HTTP backend (URL and key come from the env), comments marked.
 export const lificWrapper = (node, bin) => `#!${node}
 ${marked}
 const r = require('child_process').spawnSync(${JSON.stringify(bin)}, ['--backend', 'http', ...marked(process.argv.slice(2), process.env.BATON_RUN)], { stdio: 'inherit' });
@@ -547,11 +547,13 @@ function tick() {
 }
 
 // Agents call the tracker as plain `lific …`: a wrapper on their PATH (lificWrapper) pins the HTTP backend and marks their comments.
+// It is lific.cjs with `lific` a symlink to it: Node takes the module type from the real path, so require works there.
 // baton-inbox.cjs is the runs' hook (inboxHook), passed with --settings so it adds to the repo's own hooks.
 const HOOKS = JSON.stringify({ hooks: Object.fromEntries(['PostToolUse', 'Stop'].map((e) => [e, [{ hooks: [{ type: 'command', command: `"${DIR}/bin/baton-inbox.cjs"` }] }]])) });
 function agentBin() {
   mkdirSync(`${DIR}/bin`, { recursive: true });
-  writeFileSync(`${DIR}/bin/lific`, lificWrapper(process.execPath, CFG.lific.bin)); chmodSync(`${DIR}/bin/lific`, 0o755);
+  writeFileSync(`${DIR}/bin/lific.cjs`, lificWrapper(process.execPath, CFG.lific.bin)); chmodSync(`${DIR}/bin/lific.cjs`, 0o755);
+  rmSync(`${DIR}/bin/lific`, { force: true }); symlinkSync('lific.cjs', `${DIR}/bin/lific`);
   writeFileSync(`${DIR}/bin/baton-inbox.cjs`, inboxHook(process.execPath)); chmodSync(`${DIR}/bin/baton-inbox.cjs`, 0o755);
 }
 const loop = async () => {
