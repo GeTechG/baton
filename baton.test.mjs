@@ -214,6 +214,17 @@ test('wave: free slots are filled while other issues run; the offer skips what o
   const asked = [];
   offer(todo, (i) => (asked.push(i.identifier), ok(i)), () => false, 1);
   assert.deepEqual(asked, ['OS-5', 'OS-6', 'OS-7']); // ok (it may estimate a footprint) only while the window is not full
+
+});
+
+test('wave: the window is filled greedily in board order with issues that overlap neither work nor each other', () => {
+  const run = { ...issue('OS-1', { fp: 'src/a.js' }), status: 'in_progress' };
+  const todo = [issue('OS-2', { fp: 'src/p/x.js' }), issue('OS-3', { fp: 'src/p/' }), issue('OS-4', { fp: 'src/p/x.js' }),
+    issue('OS-5', { fp: 'src/a.js' }), issue('OS-6', { fp: 'src/b.js' }), issue('OS-7', { fp: 'src/p' }), issue('OS-8', { fp: 'src/c.js' })];
+  const ok = (i, taken) => !whyNot(i, [run, ...taken], () => 'done'), keys = (l) => l.map((i) => i.identifier);
+  assert.deepEqual(keys(offer(todo, ok, () => false, 3)), ['OS-2', 'OS-6', 'OS-8']); // OS-3, OS-4, OS-7 clash with OS-2, OS-5 with work
+  assert.deepEqual(keys(offer(todo.slice(1), ok, () => false, 2)), ['OS-3', 'OS-6']); // a skipped one stays first next wave
+  assert.deepEqual(keys(offer(todo, ok, (i) => i.identifier === 'OS-4', 2)), ['OS-4', 'OS-2', 'OS-6']); // parked: offered anyway
 });
 
 test('wave: one that started nothing is asked again after each pause, a limited number of times', () => {

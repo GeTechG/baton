@@ -8,7 +8,8 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 - **Waves:** humans file issues as `todo`. Up to `maxWave` (default 5) issues are in work (`active`) at once; while
   fewer are, baton asks the orchestrator to fill the free slots: one model call that sees the first `maxWave` (in the
   board's manual order: higher = first) not yet started `todo` issues and every parked one that pass the hard gates
-  below (so none overlaps an issue in work), with their descriptions, footprints, blockers (each with its status: all closed, baton checked) and people's latest comments,
+  below (so none overlaps an issue in work), with the not yet started ones taken greedily: one whose footprint overlaps
+  an issue already taken into that window is skipped (it stays first in line for the next wave), with their descriptions, footprints, blockers (each with its status: all closed, baton checked) and people's latest comments,
   what is in work, the number of free slots, the other open and recently closed issues,
   every agent's name and description, and each project's `AGENTS.md`. It answers which issues start now (at most one per
   free slot) and which agent takes each; baton starts them. It is asked again only when a slot comes free (an issue in

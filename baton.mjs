@@ -109,11 +109,14 @@ export const snapshot = (issues, waiting = []) => JSON.stringify([waiting.map((i
 // `sec` after the `empties`-th such wave in a row. Past the last pause the answer stands until something changes.
 export const again = (empties, sec, pauses = CFG.waveRetrySec) => empties > 0 && sec >= pauses[empties - 1];
 // What the orchestrator is offered, from the todo issues free of blockers and humans (board order): those that pass
-// ok(i) (no footprint overlap with an issue in work), every parked one (has a run) and the first `max` not yet started.
-// Parked first. ok is called only on what is still in reach of the window: it may estimate a footprint.
+// ok(i, taken) (no footprint overlap with an issue in work nor with `taken`), every parked one (has a run; checked
+// against work only) and the first `max` not yet started, taken greedily: one that overlaps an issue already in the
+// window is skipped, so the window does not fill with issues of which only one can start. Parked first. ok is called
+// only on what is still in reach of the window: it may estimate a footprint.
 export function offer(todo, ok, parked, max = CFG.maxWave) {
   let n = 0;
-  const res = todo.filter((i) => (parked(i) || n < max) && ok(i) && (parked(i) || ++n));
+  const res = [];
+  for (const i of todo) if ((parked(i) ? ok(i, []) : n < max && ok(i, res) && ++n)) res.push(i);
   return [...res.filter(parked), ...res.filter((i) => !parked(i))];
 }
 // Free slots: cfg.maxWave issues may be in work (in_progress) at once.
@@ -486,7 +489,7 @@ function tick() {
   }
 
   // Wave: whenever fewer than cfg.maxWave issues are in work, the orchestrator fills the free slots from the startable
-  // issues, in board order. cfg.maxWave also caps the not yet started ones offered; a todo issue that has a run was
+  // issues, in board order. cfg.maxWave also caps the not yet started ones offered, none overlapping another; a todo issue that has a run was
   // parked mid-work and is always offered. A needs-human issue is human-owned (spec approval, QA): no footprint call,
   // never offered.
   const held = issues.filter(flying);
@@ -495,8 +498,8 @@ function tick() {
   milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p), statusOf);
   const room = slots(issues);
   if (room <= 0) return;
-  const offering = () => offer(free.filter((x) => x.status === 'todo'), (x) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
-    !whyNot(x, held, statusOf, projects[x.project_id].sharedPaths)), (x) => runs[x.identifier])
+  const offering = () => offer(free.filter((x) => x.status === 'todo'), (x, taken) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
+    !whyNot(x, [...held, ...taken], statusOf, projects[x.project_id].sharedPaths)), (x) => runs[x.identifier])
     .map((x) => (x.said ??= said(tj('comment', 'list', x.identifier)), x));
   const waiting = offering();
   if (!waiting.length) return;
