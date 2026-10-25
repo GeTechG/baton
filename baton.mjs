@@ -9,6 +9,7 @@
 // `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
 // ponytail: prefix-match footprints, 100 open issues per project and status, one `issue get` per open issue per tick,
 // a run is "alive" while its pid exists (a reboot can recycle it), a worktree's processes are found in /proc (Linux only),
+// one `comment list` per running issue per tick, a comment reaches a running agent only after its current tool call,
 // agents and the orchestrator run on the claude CLI only.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
 // cfg.projects.*.milestone: once a project's queue is empty, the gate of its merged tree runs; a red stage is bisected and filed as todo.
@@ -127,6 +128,22 @@ export function picks(out, keys, agents) {
 }
 // Why a wave came out empty, for the log: the orchestrator's reply on one line, capped.
 export const reason = (out) => out.replace(/\s+/g, ' ').trim().slice(0, 300) || 'empty reply';
+// What a running agent hears (r.heard = the newest comment id it has seen or was told of): the comments on its issue newer
+// than `since`, not by the agents' tracker user, oldest first -> { since, said }. Its own comments only move `since`.
+export function news(comments, since, bot = CFG.agent.user) {
+  const fresh = comments.filter((c) => c.id > since).sort((a, b) => a.id - b.id);
+  return { since: Math.max(since, ...fresh.map((c) => c.id)), said: fresh.filter((c) => c.author !== bot).map((c) => `${c.author}: ${c.content}`) };
+}
+// The runs' Claude Code hook (PostToolUse, Stop), a script for `node`: the inbox $BATON_INBOX, if any, goes to the model
+// (exit 2 puts stderr in front of it; on Stop it also keeps the turn going) and is gone. A sub-agent's tool call (agent_id
+// in the hook input) leaves it to the main agent, which holds the issue.
+export const inboxHook = (node) => `#!${node}
+const fs = require('fs'), f = process.env.BATON_INBOX, read = f + '.read';
+let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => {
+  try { if (!f || JSON.parse(s || '{}').agent_id) return; fs.renameSync(f, read); } catch { return; }
+  process.stderr.write(fs.readFileSync(read, 'utf8')); fs.rmSync(read); process.exitCode = 2;
+});
+`;
 // Manual board order (what the human dragged higher goes first); issue number breaks ties.
 export const byBoard = (a, b) => a.sort_order - b.sort_order || a.sequence - b.sequence;
 
@@ -182,7 +199,7 @@ export function fixIssue(p, sha, stage, c, text, logs) {
       `Stage output:\n\n\`\`\`\n${text}\n\`\`\`\n\nLogs: ${logs.join(', ')}` };
 }
 
-// ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, agent, session, wt, n, total, pos } } ----
+// ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, agent, session, wt, n, total, pos, heard } } ----
 const RUNS = `${DIR}/runs.json`;
 const loadRuns = () => try_(() => JSON.parse(readFileSync(RUNS, 'utf8'))) ?? {};
 const saveRuns = (runs) => writeFileSync(RUNS, JSON.stringify(runs));
@@ -232,7 +249,7 @@ function forget(p, key, runs) {
   const wt = runs[key]?.wt, killed = wt ? reap(wt) : 0;
   if (runs[key]?.watch) try_(() => H('tab', 'close', runs[key].watch));
   if (wt) { try_(() => run('git', ['-C', source(p), 'worktree', 'remove', '--force', wt])); rmSync(wt, { recursive: true, force: true }); }
-  delete runs[key]; saveRuns(runs);
+  rmSync(inbox(key), { force: true }); delete runs[key]; saveRuns(runs);
   return killed ? ['killed', killed] : [];
 }
 // The Claude Code transcript of the run's session, if that session ever started (a run that died before it has nothing to resume).
@@ -258,10 +275,13 @@ function start(p, i, runs, a) {
   const prompt = first ? firstPrompt(a, p, i)
     : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
+  // A new run reads every comment on its own; the inbox is for what comes while it runs (listen()).
+  const last = try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new
+  r.heard = last && Math.max(0, ...last.map((c) => c.id)); rmSync(inbox(i.identifier), { force: true });
   const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
   r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
-  const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
-    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH) }) });
+  const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, '--settings', HOOKS, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
+    env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH), BATON_INBOX: inbox(i.identifier) }) });
   child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
   if (CFG.herdr) try { watchTab(i.identifier, r); } catch (e) { log('herdr', 'herdr tab failed', e.message.split('\n')[0]); }
   child.unref(); r.pid = child.pid; r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off, review or park; total names the run
@@ -276,6 +296,23 @@ function forward(runs) {
     const { pos, out } = tail(readFileSync(f), r.pos ?? 0), [bin, args] = LIFIC();
     if (out.length && try_(() => execFileSync(bin, [...args, 'issue', 'log', 'add', key, `--source=run ${r.total}`], { input: out.join('\n'), stdio: ['pipe', 'pipe', 'pipe'] })) == null) continue;
     r.pos = pos; saveRuns(runs);
+  }
+}
+// Comments people add while an agent runs go to its inbox (state/inbox/<KEY>); the run's hook (inboxHook) hands them to
+// the model after its next tool call, or keeps it from ending its turn before it has read them.
+const inbox = (key) => `${DIR}/inbox/${key}`;
+function listen(runs) {
+  for (const [key, r] of Object.entries(runs).filter(([, x]) => x.heard != null && alive(x))) {
+    const cs = try_(() => tj('comment', 'list', key, '--limit', '50'));
+    if (!cs) continue;
+    const { since, said } = news(cs, r.heard);
+    if (since === r.heard) continue;
+    if (said.length) {
+      mkdirSync(`${DIR}/inbox`, { recursive: true });
+      appendFileSync(inbox(key), said.map((c) => `New comment on ${key} while you work; read it now, it may change your task.\n${c}\n\n`).join(''));
+      log(null, 'tell', key, said.length, said.length > 1 ? 'comments' : 'comment');
+    }
+    r.heard = since; saveRuns(runs);
   }
 }
 function restartFresh(p, i, runs) {
@@ -386,7 +423,7 @@ function tick() {
     .map((i) => meta(tj('issue', 'get', i.identifier), notified)).sort(byBoard);
   const byKey = Object.fromEntries(issues.map((i) => [i.identifier, i]));
   const statusOf = (k) => (byKey[k] ??= meta(tj('issue', 'get', k))).status;
-  forward(runs);
+  forward(runs); listen(runs);
 
   // A closed issue gives its worktree and session back.
   for (const key of Object.keys(runs)) {
@@ -457,9 +494,12 @@ function tick() {
 }
 
 // Agents call the tracker as plain `lific …`: a wrapper on their PATH pins the HTTP backend (URL and key come from the env).
+// baton-inbox.cjs is the runs' hook (inboxHook), passed with --settings so it adds to the repo's own hooks.
+const HOOKS = JSON.stringify({ hooks: Object.fromEntries(['PostToolUse', 'Stop'].map((e) => [e, [{ hooks: [{ type: 'command', command: `"${DIR}/bin/baton-inbox.cjs"` }] }]])) });
 function agentBin() {
   mkdirSync(`${DIR}/bin`, { recursive: true });
   writeFileSync(`${DIR}/bin/lific`, `#!/bin/sh\nexec "${CFG.lific.bin}" --backend http "$@"\n`); chmodSync(`${DIR}/bin/lific`, 0o755);
+  writeFileSync(`${DIR}/bin/baton-inbox.cjs`, inboxHook(process.execPath)); chmodSync(`${DIR}/bin/baton-inbox.cjs`, 0o755);
 }
 const loop = async () => {
   for (; ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {

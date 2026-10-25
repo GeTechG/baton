@@ -66,6 +66,13 @@ orders work by.
 
 Label names and the wave size are configurable in baton's `config.json`; the names above are the defaults.
 
+## Talking to an agent at work
+
+Comment on its issue (`lific comment add <KEY> --content=...`). A comment by anyone but the agents' tracker user
+reaches the running agent after its current tool call, as a message headed `New comment on <KEY> while you work`;
+a comment made between runs is read at the start of the next one. If you are that agent: such a comment comes from a
+person about your task, so act on it now, before you go on.
+
 ## Working with it
 
 ```sh

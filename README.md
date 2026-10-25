@@ -31,6 +31,11 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   to show adds `needs-human` instead of burning tokens. When the issue closes, baton removes its worktree and first stops
   every process still running in it (cwd inside the worktree or a path into it on the command line: the agent's
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
+  **Talking to a running agent:** comment on its issue. baton checks the comments of every running issue each tick;
+  a new one not by the agents' user goes to `state/inbox/<KEY>`, and a hook baton adds to the run (`--settings`:
+  `PostToolUse` and `Stop`, on top of the repo's own hooks) shows it to the agent after its current tool call, or keeps
+  it from ending its turn before it has read it (`bridge.log`: `tell <KEY> <n> comment`). A sub-agent's tool calls leave it
+  to the main agent. A comment made while no run is active is read by the next run, as before.
   `in_review` waits for a review, not for an agent: baton leaves it alone and keeps its footprint reserved. While an issue runs it is assigned to the agents' tracker user
   (`agent.user`, default `agent`) and its run log in the tracker shows, a tick behind, what the agent is doing.
 - **Hand-offs:** the issue's `agent` property names the agent that holds it. baton sets it when it starts the issue;
@@ -38,7 +43,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   next run is that agent's (a new session in the same worktree).
 - **Herdr mode** (`"herdr": true` in `config.json`): every issue that runs gets a tab in a [Herdr](https://herdr.dev)
   workspace with the detailed live view of its agent (`node watch.mjs <KEY>`): what it says, every tool call and skill,
-  the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue.
+  the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue (it sees the comment after its current tool call).
 - **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both, stops the worktree's processes as on close, and removes the label; unpushed work in the old worktree is lost).
 
 ## Run

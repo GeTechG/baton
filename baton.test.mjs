@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offered, said, team, picks, reason, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -214,6 +214,28 @@ test('wave: the orchestrator sees what people commented, not the agents, latest 
   assert.deepEqual(said(cs, 'agent', 1), ['sergey: second line']);
   assert.equal(said([c('sergey', 'x'.repeat(900), '2026-01-01')], 'agent')[0].length, 'sergey: '.length + 600);
   assert.deepEqual(said([], 'agent'), []);
+});
+
+test('a running agent hears comments newer than the last one it saw, not its own, oldest first', () => {
+  const c = (id, author, content) => ({ id, author, content });
+  const cs = [c(9, 'sergey', 'also X'), c(8, 'agent', 'PR opened'), c(7, 'sergey', 'use Y'), c(5, 'sergey', 'old')];
+  assert.deepEqual(news(cs, 5, 'agent'), { since: 9, said: ['sergey: use Y', 'sergey: also X'] });
+  assert.deepEqual(news([c(8, 'agent', 'PR opened')], 7, 'agent'), { since: 8, said: [] }); // its own comment only moves `since`
+  assert.deepEqual(news(cs, 9, 'agent'), { since: 9, said: [] });
+  assert.deepEqual(news([], 0, 'agent'), { since: 0, said: [] });
+});
+
+test('inbox hook: hands the inbox to the main agent once (exit 2, stderr), leaves it to no sub-agent', async () => {
+  const { mkdtempSync, writeFileSync, existsSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { spawnSync } = await import('node:child_process');
+  const dir = mkdtempSync(`${tmpdir()}/baton-inbox-`), hook = `${dir}/hook.cjs`, inbox = `${dir}/OS-1`;
+  writeFileSync(hook, inboxHook(process.execPath));
+  const fire = (input) => spawnSync(process.execPath, [hook], { input: JSON.stringify(input), env: { BATON_INBOX: inbox }, encoding: 'utf8' });
+  assert.equal(fire({ hook_event_name: 'Stop' }).status, 0); // nothing queued: the turn may end
+  writeFileSync(inbox, 'New comment on OS-1\nsergey: use Y\n');
+  assert.equal(fire({ hook_event_name: 'PostToolUse', agent_id: 'a1' }).status, 0);
+  const r = fire({ hook_event_name: 'PostToolUse' });
+  assert.equal(r.status, 2); assert.equal(r.stderr, 'New comment on OS-1\nsergey: use Y\n'); assert.equal(existsSync(inbox), false);
+  assert.equal(fire({ hook_event_name: 'Stop' }).status, 0);
 });
 
 test('wave order: manual board order first, issue number on ties', () => {
