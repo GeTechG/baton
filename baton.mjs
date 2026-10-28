@@ -2,7 +2,8 @@
 // Scheduler and agent runner between Lific (the tracker) and the repos its agents work in; everything project-specific
 // is in config.json ($BATON_CONFIG). Humans file issues as `todo`. While fewer than cfg.maxWave issues are in work, the
 // orchestrator (one model call) looks at the waiting issues and fills the free slots: which start now and which agent
-// (agents/*.json) takes each. baton alone moves an issue to `active`, gives it a git worktree off the project's local checkout and runs
+// (agents/*.json) takes each; an issue it leaves out is not offered again until something changes, and it may fix the
+// board (a blocker link, needs-human). baton alone moves an issue to `active`, gives it a git worktree off the project's local checkout and runs
 // the agent there (one worktree per issue, one session per agent on it, kept until the issue closes; its `agent`
 // property names who holds it and its run log shows what the agent does).
 // Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, an assignment to a
@@ -10,7 +11,7 @@
 // ponytail: prefix-match footprints (minus a project's sharedPaths), 100 open issues per project and status, one
 // `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
 // processes are found in /proc (Linux only),
-// one `comment list` per running issue per tick, a comment reaches a running agent only after its current tool call,
+// one `comment list` per running and per refused issue per tick, a comment reaches a running agent only after its current tool call,
 // agents and the orchestrator run on the claude CLI only.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
 // cfg.projects.*.milestone: once a project's queue is empty, the gate of its merged tree runs; a red stage is bisected and filed as todo.
@@ -102,14 +103,33 @@ export function whyNot(i, flight, statusOf, shared = []) {
   const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint, shared));
   return clash ? `footprint overlaps ${clash.identifier}` : null;
 }
-// What the orchestrator decided on: the open issues and which of them were offered, in that order (a blocker closed in
-// a project baton does not list, or a new board order, changes only the offer). A change of this = ask it again.
-export const snapshot = (issues, waiting = []) => JSON.stringify([waiting.map((i) => i.identifier),
-  issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.footprint, i.title, i.description, i.said])]);
-// Nothing changed since the last wave: ask the orchestrator anyway? Only after a wave that started nothing although
-// issues were offered (one wrong "nothing" must not hold the queue until a human touches an issue): once per pause,
-// `sec` after the `empties`-th such wave in a row. Past the last pause the answer stands until something changes.
+// The open issues as the last wave left them. A change of this (a slot came free, a new board order, an edited
+// issue) ends every refusal.
+export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.sort_order, i.footprint, i.title, i.description]));
+// Refused = offered to a wave and not started, kept as key -> people's comments then. A refused issue is not offered
+// again, so the next wave is asked about the ones behind it (one refused issue overlapping the rest held the whole
+// queue). The refusal lasts while the issues stand as they were (same) and nobody comments on it (saidOf(key)).
+export const refuse = (refused, waiting, started) => ({ ...refused,
+  ...Object.fromEntries(waiting.filter((i) => !started.includes(i.identifier)).map((i) => [i.identifier, JSON.stringify(i.said ?? [])])) });
+export const stillRefused = (refused, same, saidOf) => same ? Object.fromEntries(Object.entries(refused).filter(([k, s]) => saidOf(k) === s)) : {};
+// Everything startable refused and nothing changed: ask from the top again? Only while nothing runs (one wrong
+// "nothing" must not hold the queue until a human touches an issue): once per pause, `sec` after the `empties`-th such
+// round in a row. Past the last pause the answers stand until something changes.
 export const again = (empties, sec, pauses = CFG.waveRetrySec) => empties > 0 && sec >= pauses[empties - 1];
+// The orchestrator's fixes for the offered issues it leaves out (lines picks() does not take): `<KEY> after <OTHER>: why`
+// = OTHER, an open issue that does not itself wait on KEY, becomes KEY's blocker; `<KEY> human: why` = for a person.
+export function fixes(out, keys, open) {
+  const by = Object.fromEntries(open.map((i) => [i.identifier, [...i.blockedBy]])), res = [];
+  const waits = (k, on, seen = new Set()) => k === on || (!seen.has(k) && (seen.add(k), (by[k] ?? []).some((b) => waits(b, on, seen))));
+  for (const l of out.split('\n')) {
+    const m = /^\W*([A-Z][A-Z0-9]*-\d+)\s+(?:after\s+([A-Z][A-Z0-9]*-\d+)|human)\b\W*(.*)$/i.exec(l.replace(/[`*]/g, ''));
+    if (!m || !keys.includes(m[1]) || res.some((r) => r.key === m[1])) continue;
+    const why = m[3].trim().slice(0, 300) || 'no reason given';
+    if (!m[2]) res.push({ key: m[1], why });
+    else if (by[m[2]] && !waits(m[2], m[1])) by[m[1]]?.push(m[2]), res.push({ key: m[1], after: m[2], why });
+  }
+  return res;
+}
 // What the orchestrator is offered, from the todo issues free of blockers and humans (board order): those that pass
 // ok(i, taken) (no footprint overlap with an issue in work nor with `taken`), every parked one (has a run; checked
 // against work only) and the first `max` not yet started, taken greedily: one that overlaps an issue already in the
@@ -398,7 +418,10 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room)
     `# Other open tasks\n${issues.filter((i) => !waiting.includes(i)).map(line).join('\n') || '-'}\n\n` +
     `# Recently closed\n${closed.map(line).join('\n') || '-'}\n\n` +
     (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
-    'Reply with ONLY one line per task to start: `<KEY> <agent name>`. No other text. If you start nothing, reply with one line saying why.';
+    'Reply with ONLY these lines, no other text: `<KEY> <agent name>` for each task to start. For a WAITING task you leave out ' +
+    'because it must wait for another open task, add `<KEY> after <OTHER KEY>: <why>`: OTHER becomes its blocker and it is not ' +
+    'offered until OTHER closes. For one only a person can settle (a duplicate, an obsolete or unclear task), add `<KEY> human: <why>`. ' +
+    'If you start nothing and add no such line, reply with one line saying why.';
   return execFileSync('claude', oneShot(o.model || 'sonnet'), { input: prompt, encoding: 'utf8' });
 }
 
@@ -458,7 +481,7 @@ function milestones(projects, idle, statusOf) {
   }
 }
 
-let last = { snap: null, empties: 0, at: 0 }; // the last wave: what it was decided on, how many in a row started nothing, when
+let last = { snap: null, refused: {}, empties: 0, at: 0 }; // the last wave: the issues it left, what stays refused, rounds in a row that started nothing, when
 function tick() {
   const runs = loadRuns(), { o, agents } = team(loadAgents(), CFG.orchestrator), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
   const projects = Object.fromEntries(tj('project', 'list').filter((p) => CFG.projects[p.name])
@@ -521,14 +544,16 @@ function tick() {
   milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p), statusOf);
   const room = slots(issues);
   if (room <= 0) return;
-  const offering = () => offer(free.filter((x) => x.status === 'todo'), (x, taken) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
+  // Asked about every issue once: what an earlier wave did not start stays out until the issues change or a person
+  // comments on it, so the next wave gets the ones behind it at once.
+  const same = snapshot(issues) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
+  let refused = stillRefused(last.refused, same, (k) => JSON.stringify(byKey[k].said ??= said(tj('comment', 'list', k))));
+  const offering = () => offer(free.filter((x) => x.status === 'todo' && !(x.identifier in refused)), (x, taken) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
     !whyNot(x, [...held, ...taken], statusOf, projects[x.project_id].sharedPaths)), (x) => runs[x.identifier])
     .map((x) => (x.said ??= said(tj('comment', 'list', x.identifier)), x));
-  const waiting = offering();
+  let waiting = offering();
+  if (!waiting.length && Object.keys(refused).length && again(last.empties, (Date.now() - last.at) / 1000)) refused = {}, waiting = offering();
   if (!waiting.length) return;
-  // Asked only when a slot came free or the issues changed (both change the snapshot), or by again() after an empty wave.
-  const same = snapshot(issues, waiting) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
-  if (same && !again(last.empties, (Date.now() - last.at) / 1000)) return;
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" in agents/`);
   const out = orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
@@ -541,9 +566,17 @@ function tick() {
     held.push(i);
   }
   log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : `nothing to start (${reason(out)})`, `of ${waiting.map((i) => i.identifier)}`);
-  // The snapshot the next tick will see (its own starts are no change), so the waiting rest is not offered again at once.
-  // While something runs an empty wave is not retried: the next free slot asks again.
-  last = { snap: snapshot(issues, offering()), empties: busy() ? 0 : (same ? last.empties : 0) + 1, at: Date.now() };
+  const picked = wave.map((w) => w.key);
+  for (const f of fixes(out, waiting.map((i) => i.identifier).filter((k) => !picked.includes(k)), issues)) {
+    const done = try_(() => (f.after ? t('issue', 'link', f.after, f.key) : relabel(f.key, 'add', CFG.humanLabel),
+      comment(f.key, `Bridge: ${f.after ? `waits for ${f.after}` : 'for a person'} (the orchestrator: ${f.why})`), true));
+    log(null, 'fix', f.key, f.after ? `after ${f.after}` : CFG.humanLabel, done ? f.why : 'failed');
+  }
+  // The snapshot the next tick will see (its own starts are no change; the fixes are). A round ends when nothing is
+  // left to offer; while something runs it is not retried: the next free slot asks again.
+  refused = refuse(refused, waiting, picked);
+  const over = !wave.length && !busy() && !offering().length;
+  last = { snap: snapshot(issues), refused, empties: wave.length || busy() ? 0 : (same ? last.empties : 0) + (over ? 1 : 0), at: Date.now() };
 }
 
 // Agents call the tracker as plain `lific …`: a wrapper on their PATH (lificWrapper) pins the HTTP backend and marks their comments.

@@ -12,11 +12,18 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
   an issue already taken into that window is skipped (it stays first in line for the next wave), with their descriptions, footprints, blockers (each with its status: all closed, baton checked) and people's latest comments,
   what is in work, the number of free slots, the other open and recently closed issues,
   every agent's name and description, and each project's `AGENTS.md`. It answers which issues start now (at most one per
-  free slot) and which agent takes each; baton starts them. It is asked again only when a slot comes free (an issue in
-  work closes, goes to `in_review` or is parked) or something about the issues or the offer changed (a new comment from a person on a waiting issue counts), not every tick.
-  When it starts nothing, its one-line reason goes to `bridge.log`; if nothing is in work either,
-  one wrong "nothing" would hold the queue until somebody touches an issue, so it is asked again 1, then 5, then 15 minutes later
-  (`waveRetrySec`, seconds; `[]` = never); after that its answer stands until something changes.
+  free slot) and which agent takes each; baton starts them. An offered issue it does not start is **refused**: it is
+  left out of the offer, so the next wave (on the next tick) is asked about the issues behind it, and one refused issue
+  that overlaps the rest cannot hold the whole queue. A refusal lasts until the open issues change (a slot comes free,
+  an issue in work closes, goes to `in_review` or is parked, a new board order, an edited issue, a new blocker or
+  label) or a person comments on that issue. When it starts nothing, its one-line reason goes to `bridge.log`; once
+  everything startable is refused and nothing is in work either, one wrong "nothing" would hold the queue until somebody
+  touches an issue, so it is asked again from the top 1, then 5, then 15 minutes later (`waveRetrySec`, seconds;
+  `[]` = never); after that its answers stand until something changes.
+  For an issue it leaves out it may also fix the board, with a line baton applies and explains in a `Bridge:` comment
+  on the issue: `<KEY> after <OTHER>` makes the open issue OTHER its blocker (not one that would close a cycle),
+  `<KEY> human` adds `needs-human` (a duplicate, an obsolete or unclear issue: closing it is a person's call).
+  `bridge.log` shows each as `fix`.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
   "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
   named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (Haiku-estimated if

@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, again, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -194,15 +194,38 @@ test('wave: the orchestrator is found by name (default "orchestrator") and is no
   assert.deepEqual(team([w], 'boss'), { o: undefined, agents: [w] });
 });
 
-test('wave: the orchestrator is asked again only when the issues changed', () => {
+test('wave: a change of the open issues is a change of the snapshot; footprint estimates and comments are not', () => {
   const a = issue('OS-1', { fp: 'src/a.js' });
   assert.equal(snapshot([a]), snapshot([issue('OS-1', { fp: 'src/a.js' })]));
   assert.notEqual(snapshot([a]), snapshot([{ ...a, status: 'done' }]));
   assert.notEqual(snapshot([a]), snapshot([{ ...a, agent: 'reviewer' }]));
-  assert.notEqual(snapshot([a]), snapshot([{ ...a, said: ['sergey: follow upstream'] }]));
-  const b = issue('OS-2', { fp: 'src/b.js', bb: ['LIB-3'] }); // its blocker closed in a project baton does not list: only the offer changed
-  assert.notEqual(snapshot([a, b], [a]), snapshot([a, b], [a, b]));
-  assert.notEqual(snapshot([a, b], [a, b]), snapshot([a, b], [b, a]));
+  assert.notEqual(snapshot([a]), snapshot([{ ...a, blockedBy: ['OS-2'] }]));
+  assert.notEqual(snapshot([a]), snapshot([{ ...a, sort_order: 2 }])); // a new board order
+  assert.equal(snapshot([a]), snapshot([{ ...a, said: ['sergey: follow upstream'] }])); // a comment ends only its own issue's refusal
+});
+
+test('wave: what a wave did not start stays out of the offer until the issues change or a person comments on it', () => {
+  const a = { ...issue('OS-1'), said: [] }, b = { ...issue('OS-2'), said: ['sergey: later'] }, c = { ...issue('OS-3'), said: [] };
+  const r = refuse({}, [a, b, c], ['OS-1']);
+  assert.deepEqual(Object.keys(r), ['OS-2', 'OS-3']); // the started one is not refused
+  assert.deepEqual(Object.keys(refuse(r, [{ ...issue('OS-4'), said: [] }], [])), ['OS-2', 'OS-3', 'OS-4']); // refusals add up
+  const saidNow = { 'OS-2': JSON.stringify(['sergey: later']), 'OS-3': JSON.stringify([]) };
+  assert.deepEqual(stillRefused(r, true, (k) => saidNow[k]), r);
+  assert.deepEqual(stillRefused(r, false, (k) => saidNow[k]), {}); // the issues changed: everything is offered again
+  assert.deepEqual(Object.keys(stillRefused(r, true, (k) => k === 'OS-3' ? JSON.stringify(['sergey: start it']) : saidNow[k])), ['OS-2']);
+});
+
+test('wave: the orchestrator fixes the board for issues it leaves out: a blocker link or a person, never a cycle', () => {
+  const open = [issue('OS-1'), issue('OS-2'), issue('OS-3', { bb: ['OS-1'] }), issue('OS-4')];
+  const keys = ['OS-1', 'OS-2', 'OS-4'];
+  assert.deepEqual(fixes('OS-2 after OS-1: same work as OS-1\n`OS-4 human`: duplicates OS-9', keys, open),
+    [{ key: 'OS-2', after: 'OS-1', why: 'same work as OS-1' }, { key: 'OS-4', why: 'duplicates OS-9' }]);
+  assert.deepEqual(fixes('OS-1 after OS-3: OS-3 first', keys, open), []); // OS-3 waits on OS-1 already
+  assert.deepEqual(fixes('OS-2 after OS-4\nOS-4 after OS-2', keys, open), [{ key: 'OS-2', after: 'OS-4', why: 'no reason given' }]); // nor a new one
+  assert.deepEqual(fixes('OS-2 after OS-2', keys, open), []);
+  assert.deepEqual(fixes('OS-2 after OS-77: closed long ago', keys, open), []); // not an open issue
+  assert.deepEqual(fixes('OS-3 human: not offered\nOS-1 worker\nnothing to start', keys, open), []); // not offered; picks and prose are not fixes
+  assert.deepEqual(fixes('OS-1 human: a\nOS-1 after OS-2: b', keys, open), [{ key: 'OS-1', why: 'a' }]); // one fix per issue
 });
 
 test('wave: free slots are filled while other issues run; the offer skips what overlaps work in progress', () => {
@@ -233,9 +256,9 @@ test('wave: the window is filled greedily in board order with issues that overla
   assert.deepEqual(keys(offer(todo, ok, (i) => i.identifier === 'OS-4', 2)), ['OS-4', 'OS-2', 'OS-6']); // parked: offered anyway
 });
 
-test('wave: one that started nothing is asked again after each pause, a limited number of times', () => {
+test('wave: a round that started nothing is asked again from the top after each pause, a limited number of times', () => {
   const pauses = [60, 300];
-  assert.equal(again(0, 9999, pauses), false); // the last wave started something, or there was none
+  assert.equal(again(0, 9999, pauses), false); // the last wave started something, something runs, or no round is over
   assert.equal(again(1, 59, pauses), false);
   assert.equal(again(1, 60, pauses), true);
   assert.equal(again(2, 60, pauses), false);

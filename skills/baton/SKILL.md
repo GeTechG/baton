@@ -53,7 +53,10 @@ now and which agent takes each. An issue can be picked only when all of these ho
   have it considered sooner).
 
 So a new issue can start as soon as a slot comes free, and a clear title and description are what the orchestrator
-orders work by.
+orders work by. An issue the orchestrator passes over is not offered again until the issues change or a person
+comments on it. When it decides an issue must wait for another one, it links that one as a blocker; when only a person
+can settle it (a duplicate, an obsolete or unclear issue), it adds `needs-human`. Either way a `Bridge:` comment on the
+issue says why: remove the link or the label if you disagree.
 
 ## Issue properties and labels
 
