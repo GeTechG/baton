@@ -105,6 +105,9 @@ export const agentPath = (bin, wt, path) => `${bin}:${wt}/node_modules/.bin:${pa
 // Who runs the issue next: the agent its `agent` property names, else the one that ran it last, else the base worker
 // (an issue a human set `active` by hand).
 export const holder = (i, r, dflt = 'worker') => i.agent ?? r?.agent ?? dflt;
+// The config's projects that baton's own tracker identity does not see (listed = `project list` names). Lific hides such
+// a project, and drops its issues from every `blocked_by` too, so a blocker there does not hold anything.
+export const unseen = (cfgProjects, listed) => Object.keys(cfgProjects).filter((n) => !listed.includes(n));
 // null = may start now; otherwise why not. flight = issues already held by agents or picked for this wave. statusOf(key) -> issue status.
 export function whyNot(i, flight, statusOf, shared = []) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
@@ -595,7 +598,9 @@ let last = { snap: null, refused: {}, empties: 0, at: 0 }; // the last wave: the
 let limit = 0; // until when the usage limit holds every start (ms); a restart forgets it and learns it again from one cut-off run
 function tick() {
   const runs = loadRuns(), { o, agents } = team(loadAgents(), CFG.orchestrator), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
-  const projects = Object.fromEntries(tj('project', 'list').filter((p) => CFG.projects[p.name])
+  const listed = tj('project', 'list'), hidden = unseen(CFG.projects, listed.map((p) => p.name));
+  if (hidden.length) log('unseen', 'unseen', hidden.join(', '), "not visible to baton's Lific user: add it as a member"); else seen.delete('unseen');
+  const projects = Object.fromEntries(listed.filter((p) => CFG.projects[p.name])
     .map((p) => [p.id, Object.assign(CFG.projects[p.name], { key: p.identifier })]));
   // Every open status but backlog (= not ready yet: the human moves it to todo).
   const issues = Object.values(projects).flatMap((p) => ['todo', 'active', 'in_review'].flatMap((s) => tj('issue', 'list', '-p', p.key, '--status', s, '--limit', '100')))

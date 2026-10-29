@@ -112,6 +112,9 @@ One entry in `config.json` `projects`, keyed by the Lific project name: `repo` a
 footprint tree and `AGENTS.md` are read from and what issue worktrees start at), and optionally `path` (your local
 checkout of the repo — issue worktrees are made from it; without it baton keeps its own clone under `state/src/`),
 `worktrees` (where they go; default `<path>.wt`), `footprintHint`, `sharedPaths`, `setup`, `instructions`, `land` and `milestone`.
+baton's Lific user must be a member of the project (`lific member add --project <PREFIX> --user <baton's user> --role maintainer`):
+Lific hides a project from a non-member, and its issues from every `blocked_by`, so a blocker there would not hold the
+issue that waits on it. A configured project baton does not see is in `bridge.log` as `unseen <name>`.
 
 `sharedPaths` lists paths nearly every issue names but writes only its own piece of (its own folder under them, its own
 line in a shared file), so a rebase merges the edits, e.g. `["openspec/", "docs/tech-debt.md"]`. When footprints are

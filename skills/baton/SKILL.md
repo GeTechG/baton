@@ -38,7 +38,9 @@ fighting the scheduler.
 - Don't touch an issue worktree (`<checkout>.wt/<KEY>`) that is not yours.
 - An issue is done as planned. What comes up on the way: same area, small and needing no decision — done in the same
   issue and mentioned in the comment; same area but larger, or unrelated — a separate issue; work for another project —
-  an issue there, linked as a blocker of the one that needs it. All filed as `todo`, none started by hand.
+  an issue there, linked as a blocker of the one that needs it. All filed as `todo`, none started by hand. Don't create a
+  project: one you create is yours alone, baton does not see it nor its issues as blockers. If the work has no project
+  yet, say so in a comment and add `needs-human`.
 - **Land queue** (when the repo's `AGENTS.md` says baton lands changes): do not merge into the base branch yourself.
   Push the branch, `lific issue update <KEY> --set branch=<branch>`, then `--status in_review --add-label land`, and stop.
   baton merges every ready branch of the project in one batch (a branch whose issue has a blocker not yet `done` waits

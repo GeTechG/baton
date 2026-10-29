@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -472,4 +472,9 @@ test('a one-shot model call has no tools and no MCP servers, so its single turn 
   assert.deepEqual(a.slice(0, 5), ['-p', '--model', 'haiku', '--max-turns', '1']);
   assert.equal(a[a.indexOf('--tools') + 1], '');
   assert.ok(a.includes('--strict-mcp-config'));
+});
+
+test('unseen projects: a configured project the tracker does not list for baton is reported, extra listed ones are not', () => {
+  assert.deepEqual(unseen({ app: {}, fork: {} }, ['app', 'other']), ['fork']);
+  assert.deepEqual(unseen({ app: {} }, ['app']), []);
 });
