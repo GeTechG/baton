@@ -46,6 +46,8 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   `limit <KEY> run not counted, agents wait until <time>`, UTC like the rest of the log). When the issue closes, baton removes its worktree and first stops
   every process still running in it (cwd inside the worktree or a path into it on the command line: the agent's
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
+  The local branch the worktree had checked out (it lives in the shared checkout) goes too, once `origin/<base>` contains it;
+  an unmerged one stays.
   **Talking to a running agent:** comment on its issue. baton checks the comments of every running issue each tick;
   a new one goes to `state/inbox/<KEY>` unless the run itself wrote it, and a hook baton adds to the run (`--settings`:
   `PostToolUse` and `Stop`, on top of the repo's own hooks) shows it to the agent after its current tool call, or keeps
@@ -149,7 +151,7 @@ default 5), merges their branches one after another onto `origin/<base>` in a cl
 detached like the milestone, after the project's `setup`, under `timeout timeoutSec` (default 2400). The gate sees the
 batch as one change against `origin/<base>`. Green: baton pushes the merged commit to `<base>` (a plain push: if the base
 has moved meanwhile, it is rejected and the batch is tried again from the start), sets each issue `done` with a comment,
-and deletes its branch on origin. Red: the batch's prefixes (the base plus its first k branches) are bisected, each with
+and deletes its branch on origin (`bridge.log`: `land <project> branch kept <branch>` if that fails). Red: the batch's prefixes (the base plus its first k branches) are bisected, each with
 the full `cmd`, so at most 1 + log2(n) gate runs; the longest green prefix lands as above, the branch that turns it red goes
 back to its agent: the issue is `active` again (its footprint stays reserved; this may take the wave past `maxWave` for a while), loses the label, and gets a `Bridge:`
 comment with the gate's output; the branches after it wait for the next batch. A branch that is missing on origin or

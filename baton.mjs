@@ -338,11 +338,18 @@ export function reap(wt, graceMs = 3000) {
   kill('SIGKILL');
   return n;
 }
+// The branch a worktree has checked out (`git symbolic-ref -q HEAD`), if it is the agent's own: never the base, never detached.
+export const ownBranch = (ref, base) => { const b = ref?.trim().replace(/^refs\/heads\//, ''); return b && b !== ref?.trim() && b !== base ? b : null; };
 // The issue's worktree, its processes and its session are gone; pushed work stays on its branch. Returns log words.
+// The worktree's local branch goes with it once origin/<base> contains it (it lives in the shared checkout, so it would pile up).
 function forget(p, key, runs) {
-  const wt = runs[key]?.wt, killed = wt ? reap(wt) : 0;
+  const wt = runs[key]?.wt, killed = wt ? reap(wt) : 0, git = (...a) => run('git', ['-C', source(p), ...a]);
   if (runs[key]?.watch) try_(() => H('tab', 'close', runs[key].watch));
-  if (wt) { try_(() => run('git', ['-C', source(p), 'worktree', 'remove', '--force', wt])); rmSync(wt, { recursive: true, force: true }); }
+  if (wt) {
+    const b = ownBranch(try_(() => run('git', ['-C', wt, 'symbolic-ref', '-q', 'HEAD'])), p.base);
+    try_(() => git('worktree', 'remove', '--force', wt)); rmSync(wt, { recursive: true, force: true });
+    if (b) try_(() => (git('fetch', '-q', 'origin', p.base), git('merge-base', '--is-ancestor', b, `origin/${p.base}`), git('branch', '-q', '-D', b)));
+  }
   rmSync(inbox(key), { force: true }); delete runs[key]; saveRuns(runs);
   return killed ? ['killed', killed] : [];
 }
@@ -555,7 +562,7 @@ function lands(projects, issues, byKey, statusOf) {
       else for (const b of landed) {
         t('issue', 'update', b.key, '--status=done'); if (byKey[b.key]) byKey[b.key].status = 'done';
         comment(b.key, `Bridge: landed on \`${p.base}\` at ${sha.slice(0, 10)}${landed.length > 1 ? `, in one gated batch with ${landed.filter((x) => x !== b).map((x) => x.key).join(', ')}` : ''}.`);
-        try_(() => git('push', '-q', 'origin', '--delete', b.branch));
+        if (try_(() => git('push', '-q', 'origin', '--delete', b.branch)) == null) log(null, 'land', p.key, 'branch kept', b.branch, 'deleting it on origin failed');
         log(null, 'land', p.key, 'landed', b.key, sha.slice(0, 10));
       }
       const red = l.batch[l.r - 1], i = red && byKey[red.key];
