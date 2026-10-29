@@ -3,7 +3,8 @@
 Scheduler and agent runner on top of [Lific](https://github.com/VoidNullable/lific), a single-binary local issue
 tracker. Lific holds the issues and is the UI; baton decides **when** each issue runs and **who** takes it, and runs
 the coding agent for it in a git worktree of your own checkout. It does not say how a repo is run: branches, PRs, CI,
-merging and who sets `done` come from the agents' instructions (`agents/*.json`) and the repo's own `AGENTS.md`.
+merging and who sets `done` come from the agents' instructions (`agents/*.json`) and the repo's own `AGENTS.md`, unless a
+project turns on the land queue (`land`, below): then baton merges, gates and pushes what the agents hand over.
 
 - **Waves:** humans file issues as `todo`. Up to `maxWave` (default 5) issues are in work (`active`) at once; while
   fewer are, baton asks the orchestrator to fill the free slots: one model call that sees the first `maxWave` (in the
@@ -59,12 +60,17 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
 - **Herdr mode** (`"herdr": true` in `config.json`): every issue that runs gets a tab in a [Herdr](https://herdr.dev)
   workspace with the detailed live view of its agent (`node watch.mjs <KEY>`): what it says, every tool call and skill,
   the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue (it sees the comment after its current tool call).
+- **Land queue** (a project's `land`): an agent does not merge its own branch. It pushes it, names it in the issue's
+  `branch` property and hands the issue over: `in_review` with the label `land` (`landLabel`). baton merges every ready
+  branch of the project in one batch, runs the landing gate once on the whole batch and pushes it; a red batch is
+  bisected, and the branch that turns it red goes back to its agent (`active` again, with the gate's output in a
+  `Bridge:` comment), while the branches before it land. Details under *Adding a project*.
 - **Fresh start:** label `fresh` on an issue = its next run starts with a new session and a new worktree (baton drops both, stops the worktree's processes as on close, and removes the label; unpushed work in the old worktree is lost).
 
 ## Run
 1. Lific: put the binary at `bin/lific` (it must be built from `master` of the fork, GeTechG/lific: `in_review` status, issue properties,
    run log, `issue update --add-label/--remove-label`, `issue link` defaulting to `blocks` — none of it is upstream), `bin/lific init` (config, database, your admin account, a user service on
-   `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human` and `fresh` in each, and two bot users with an API key each
+   `:3456`). Create one project per repo (its name = the key in `config.json`), the labels `needs-human` and `fresh` in each (and `land` in a project with a land queue), and two bot users with an API key each
    (`lific user create --bot`, `lific member add --all … --role maintainer`, `lific key create`): one for baton, one for the agents.
 2. `.env` (gitignored): `LIFIC_API_KEY=` baton's key, `AGENT_LIFIC_API_KEY=` the agents' key, `AGENT_GH_TOKEN=` the
    GitHub token agents push with. Every `AGENT_X` reaches the agent processes as `X`; baton itself uses the machine's `gh` login.
@@ -79,7 +85,7 @@ merging and who sets `done` come from the agents' instructions (`agents/*.json`)
      }
    }
    ```
-   Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `waveRetrySec`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`,
+   Optional: `orchestrator`, `agents`, `maxWave`, `maxRuns`, `waveRetrySec`, `stateDir`, `tickSec`, `humanLabel`, `freshLabel`, `landLabel`, `notify.ntfy` (topic URL), `agent.user`, `agent.cmd`,
    `herdr` (`true`, or `{ "workspace": "baton-agents" }`: the label of the workspace the tabs go to, in the default Herdr session, which must be running).
 4. `scripts/up.sh` (or, with `.env` exported, `npm start` / `node baton.mjs --once` for one tick). State and `bridge.log` go to `state/`.
 
@@ -103,7 +109,7 @@ baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `s
 One entry in `config.json` `projects`, keyed by the Lific project name: `repo` and `base` (any branch; where the
 footprint tree and `AGENTS.md` are read from and what issue worktrees start at), and optionally `path` (your local
 checkout of the repo — issue worktrees are made from it; without it baton keeps its own clone under `state/src/`),
-`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `sharedPaths`, `setup`, `instructions` and `milestone`.
+`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `sharedPaths`, `setup`, `instructions`, `land` and `milestone`.
 
 `sharedPaths` lists paths nearly every issue names but writes only its own piece of (its own folder under them, its own
 line in a shared file), so a rebase merges the edits, e.g. `["openspec/", "docs/tech-debt.md"]`. When footprints are
@@ -119,6 +125,29 @@ in `bridge.log`), and is parked; remove the label to try again. It runs inside b
 
 `instructions` is text for the agents of this project only: baton appends it to an agent's first prompt on the issue
 as a paragraph headed `Project guidance:`. The agents' own instructions stay project-independent.
+
+`land` turns on the merge queue for the project. The landing gate (say 15 minutes of the whole machine) then runs once per
+batch instead of once per issue, plus again after every rebase onto a base another issue has just moved; and agents
+never wait for it.
+```json
+"land": { "cmd": "tools/check release --merge-gate", "max": 5, "timeoutSec": 3600 }
+```
+An issue is ready to land when it is `in_review`, has the label `land` (`landLabel`; create it in the project) and no
+`needs-human`, and its `branch` property names a branch on origin; what has to happen before that (a review, human QA)
+is the repo's rules. While no batch of the project is in work, baton takes the ready issues (board order, at most `max`,
+default 5), merges their branches one after another onto `origin/<base>` in a clean worktree `<worktrees>/_land`
+(`git merge --no-ff`, subject `Merge <branch> (<KEY>)`, so the milestone's bisect finds the issue) and runs `cmd` there,
+detached like the milestone, after the project's `setup`, under `timeout timeoutSec` (default 2400). The gate sees the
+batch as one change against `origin/<base>`. Green: baton pushes the merged commit to `<base>` (a plain push: if the base
+has moved meanwhile, it is rejected and the batch is tried again from the start), sets each issue `done` with a comment,
+and deletes its branch on origin. Red: the batch's prefixes (the base plus its first k branches) are bisected, each with
+the full `cmd`, so at most 1 + log2(n) gate runs; the longest green prefix lands as above, the branch that turns it red goes
+back to its agent: the issue is `active` again (its footprint stays reserved; this may take the wave past `maxWave` for a while), loses the label, and gets a `Bridge:`
+comment with the gate's output; the branches after it wait for the next batch. A branch that is missing on origin or
+does not merge cleanly onto the base and the branches before it goes back at once, the same way. An issue waiting in
+the queue holds no agent and no slot, but keeps its footprint reserved until it lands. The milestone waits while a
+batch runs or an issue waits to land. Logs and state: `state/lands/`, `state/lands.json`; `bridge.log` has a
+`land <KEY> gate|green|red|landed|back|push failed` line for each step.
 
 `milestone` is the gate of the merged tree, for a repo whose per-issue gate leaves some stages to it. baton runs it
 once the project's queue is empty (no agent run is active and no issue of the project waits to start) and `origin/<base>`
@@ -153,4 +182,4 @@ and what not to do by hand. Install: `npx skills add GeTechG/baton` (add `-g` fo
 ## Tests
 - `node watch.mjs` — live view of what every running agent is doing (run it in a spare terminal pane);
   `node watch.mjs <KEY>` — the detailed view of one issue, from the start of its log.
-- `npm test` — pure logic (footprints, gates, run decisions, wave parsing, milestone decisions).
+- `npm test` — pure logic (footprints, gates, run decisions, wave parsing, land queue and milestone decisions).

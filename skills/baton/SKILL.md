@@ -11,7 +11,8 @@ This project is not driven by hand. Two systems own the flow of work:
   repo), issues, labels, properties, "blocked by" links, comments. UI: `http://localhost:3456`. CLI: `lific`.
 - **baton** (https://github.com/GeTechG/baton) — a small scheduler on top of Lific. It decides **when** each issue
   runs and **which agent** takes it, and runs that agent in a per-issue git worktree of the maintainer's checkout.
-  Nothing else: how a change reaches the base branch (push, PR, CI, review) is the repo's own process.
+  Nothing else: how a change reaches the base branch (push, PR, CI, review) is the repo's own process, unless the
+  project has a land queue: then the agent hands its pushed branch to baton, which merges, gates and pushes it.
 
 If baton started you on an issue, your agent instructions are the authority for the workflow; this skill only explains
 the system around them. If you are in an interactive session in such a repo, the rules below are what keep you from
@@ -25,16 +26,25 @@ fighting the scheduler.
 | Move it to `active`, pick its agent, start the run | **baton only** |
 | Hand the issue to another agent (`lific issue update <KEY> --set agent=<name>`) | the agent holding it, when the repo's `AGENTS.md` says so |
 | Implement, deliver the way the repo's `AGENTS.md` says, set `done` | the agent |
+| With a land queue: merge, run the landing gate, push, set `done` (or send the issue back) | **baton** |
 
 ## Rules
 
 - **Never set an issue `active` yourself.** File it as `todo`; baton starts it when it is ready. Handing on an issue you
   hold is fine: it stays in flight under its new agent.
-- Stay inside the issue's `footprint`. It is how baton keeps parallel agents off each other's files.
+- Stay inside the issue's `footprint`. It is how baton keeps parallel agents off each other's files. Once you know
+  which paths the change really touches, narrow it to them (`--set footprint=…`): other issues can then start beside
+  yours. Never widen it; what needs a path outside it is a separate issue.
 - Don't touch an issue worktree (`<checkout>.wt/<KEY>`) that is not yours.
 - An issue is done as planned. What comes up on the way: same area, small and needing no decision — done in the same
   issue and mentioned in the comment; same area but larger, or unrelated — a separate issue; work for another project —
   an issue there, linked as a blocker of the one that needs it. All filed as `todo`, none started by hand.
+- **Land queue** (when the repo's `AGENTS.md` says baton lands changes): do not merge into the base branch yourself.
+  Push the branch, `lific issue update <KEY> --set branch=<branch>`, then `--status in_review --add-label land`, and stop.
+  baton merges every ready branch of the project in one batch, runs the landing gate once and pushes; you need not
+  rebase onto a base that moved. If the batch is red because of your branch, or it does not merge, the issue comes back
+  `active` with the gate's output in a `Bridge:` comment: fix it in the same issue, push, hand it over again. A failure
+  found after landing (the milestone) is a new issue.
 - An issue that asks for a review is done when the review comes back clean: its findings are fixed in the same issue
   and the review is run again, not filed as new issues. Write "read-only" in the issue if you want only the report.
 
@@ -67,6 +77,8 @@ issue says why: remove the link or the label if you disagree.
 | blocked by | link | `lific issue link <BLOCKER> <BLOCKED>`: the blocked issue waits until the blocker is done. |
 | `needs-human` | label | Parked for a human; baton will not run it and pings the human once. |
 | `fresh` | label | Next run starts with a new session and a new worktree; baton removes the label. |
+| `land` | label | With `in_review`: the branch is ready for baton's land queue. Removed when the issue comes back. |
+| `branch` | property | The pushed branch the land queue merges. Set by the agent. |
 
 Label names and the wave size are configurable in baton's `config.json`; the names above are the defaults.
 

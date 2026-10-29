@@ -7,13 +7,16 @@
 // the agent there (one worktree per issue, one session per agent on it, kept until the issue closes; its `agent`
 // property names who holds it and its run log shows what the agent does).
 // Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, an assignment to a
-// person, overlapping `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business.
+// person, overlapping `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business,
+// unless the project has a land queue (cfg.projects.*.land): then baton merges, gates and pushes the branches agents hand over.
 // ponytail: prefix-match footprints (minus a project's sharedPaths), 100 open issues per project and status, one
 // `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
 // processes are found in /proc (Linux only),
 // one `comment list` per running and per refused issue per tick, a comment reaches a running agent only after its current tool call,
 // agents and the orchestrator run on the claude CLI only.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
+// cfg.projects.*.land: the merge queue; agents hand over finished branches, baton merges the ready ones in a batch, gates the
+// batch once and pushes it, or bisects it and sends the branch that turns it red back to its agent.
 // cfg.projects.*.milestone: once a project's queue is empty, the gate of its merged tree runs; a red stage is bisected and filed as todo.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +30,7 @@ import { plain, say } from './watch.mjs';
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
-CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.maxWave ??= 5; CFG.maxRuns ??= 3; CFG.tickSec ??= 5; CFG.waveRetrySec ??= [60, 300, 900];
+CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.landLabel ??= 'land'; CFG.maxWave ??= 5; CFG.maxRuns ??= 3; CFG.tickSec ??= 5; CFG.waveRetrySec ??= [60, 300, 900];
 CFG.agent ??= {}; CFG.agent.user ??= 'agent'; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.lific) CFG.lific.bin = resolve(ROOT, CFG.lific.bin);
@@ -258,6 +261,22 @@ export function fixIssue(p, sha, stage, c, text, logs) {
       `Stage output:\n\n\`\`\`\n${text}\n\`\`\`\n\nLogs: ${logs.join(', ')}` };
 }
 
+// p.land: the issues (of one project) ready to land, in board order: in review, labelled cfg.landLabel, not for a person; at most `max`.
+export const landable = (issues, max = Infinity) => issues.filter((i) => i.status === 'in_review' &&
+  i.labels.includes(CFG.landLabel) && !i.labels.includes(CFG.humanLabel)).slice(0, max);
+// The bisect over a batch of n branches merged one after another: prefix k = the base plus the first k of them. g = the
+// longest prefix known green (0 = the base itself), r = the shortest known red (n + 1 = none). After prefix k came out ok
+// or not -> the next state; k = null once settled: prefix g lands, and branch r, if r <= n, is the one that turns it red.
+// Every prefix is tried with the full gate, so the green one is the exact tree that lands.
+export function probe(s, ok) {
+  const g = ok ? s.k : s.g, r = ok ? s.r : s.k;
+  return { ...s, g, r, k: r - g > 1 ? Math.floor((g + r) / 2) : null };
+}
+// The comment on an issue the land queue sends back to its agent.
+export const bounced = (base, why, text = '') => `Bridge: not landed: ${why}. Fix it in this issue (the branch is still yours: ` +
+  `merge or rebase onto \`origin/${base}\` if needed), push, then hand it over again: status \`in_review\` with the label \`${CFG.landLabel}\`.` +
+  (text ? `\n\nThe gate's last output:\n\n\`\`\`\n${text}\n\`\`\`` : '');
+
 // ---- runs: one detached agent process per issue; state/runs.json = { KEY: { pid, agent, session, wt, n, total, pos, heard } } ----
 const RUNS = `${DIR}/runs.json`;
 const loadRuns = () => try_(() => JSON.parse(readFileSync(RUNS, 'utf8'))) ?? {};
@@ -429,14 +448,15 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room)
 // origin/<base>, then p.milestone.bisect once per red stage; each red stage = one todo issue. Logs in state/milestones/,
 // state in state/milestones.json = { <project key>: { sha, good, tried, green, filed, wt, pid, log, mlog, stage, queue } }. ----
 const MS = `${DIR}/milestones.json`, fetched = {}; // fetched: project key -> when origin was last fetched for it
-function job(p, m, src, cmd, name, extra = {}) {
-  mkdirSync(`${DIR}/milestones`, { recursive: true });
-  m.log = `${DIR}/milestones/${name}.log`; rmSync(`${m.log}.exit`, { force: true });
-  const out = openSync(m.log, 'w'), child = spawn('sh', ['-c', 'timeout -k 30 "$0" sh -c "$1"; echo $? > "$2"', String(p.milestone.timeoutSec ?? 2400), cmd, `${m.log}.exit`],
+// A detached job (a milestone, a bisect, a land gate) in the worktree m.wt, under `timeout sec`: its output goes to `log`, its exit code to `<log>.exit`.
+function job(m, src, cmd, file, sec = 2400, extra = {}) {
+  mkdirSync(dirname(file), { recursive: true });
+  m.log = file; rmSync(`${m.log}.exit`, { force: true });
+  const out = openSync(m.log, 'w'), child = spawn('sh', ['-c', 'timeout -k 30 "$0" sh -c "$1"; echo $? > "$2"', String(sec), cmd, `${m.log}.exit`],
     { cwd: m.wt, detached: true, stdio: ['ignore', out, out], env: { ...process.env, BATON_SOURCE: src, BATON_ISSUE: 'milestone', ...extra } });
   child.unref(); m.pid = child.pid;
 }
-function dropMilestoneTree(m, src) {
+function dropTree(m, src) {
   if (!m.wt) return;
   reap(m.wt); try_(() => run('git', ['-C', src, 'worktree', 'remove', '--force', m.wt])); rmSync(m.wt, { recursive: true, force: true });
 }
@@ -460,9 +480,9 @@ function settle(p, m, src) {
   } else file(m.stage, culprit(out, (sha) => try_(() => run('git', ['-C', src, 'log', '-1', '--format=%s', sha]))), excerpt(read(m.mlog), m.stage), [m.mlog, m.log]);
   if (m.queue?.length) {
     m.stage = m.queue.shift();
-    job(p, m, src, p.milestone.bisect, `${p.key}-bisect-${m.queue.length}`, { BATON_STAGE: m.stage, BATON_BAD: m.sha, BATON_GOOD: m.good ?? '' });
+    job(m, src, p.milestone.bisect, `${DIR}/milestones/${p.key}-bisect-${m.queue.length}.log`, p.milestone.timeoutSec, { BATON_STAGE: m.stage, BATON_BAD: m.sha, BATON_GOOD: m.good ?? '' });
     log(null, 'milestone', p.key, 'bisect', m.stage, `pid ${m.pid}`);
-  } else { m.stage = null; dropMilestoneTree(m, src); }
+  } else { m.stage = null; dropTree(m, src); }
 }
 function milestones(projects, idle, statusOf) {
   const ms = try_(() => JSON.parse(readFileSync(MS, 'utf8'))) ?? {}, save = () => writeFileSync(MS, JSON.stringify(ms));
@@ -474,11 +494,80 @@ function milestones(projects, idle, statusOf) {
     const head = git('rev-parse', `origin/${p.base}`), green = p.milestone.tag ? git('rev-parse', '-q', '--verify', `refs/tags/${p.milestone.tag}^{commit}`) : m.green;
     if (!milestoneDue(true, head, green, m.tried, (m.filed ?? []).some((k) => !CLOSED.includes(statusOf(k))))) continue;
     Object.assign(m, { sha: head, good: green, tried: head, filed: [], queue: [], stage: null, wt: wtDir(p, src, '_milestone') });
-    dropMilestoneTree(m, src); git('worktree', 'prune'); run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', m.wt, head]);
-    job(p, m, src, p.setup ? `(${p.setup}\n) && ${p.milestone.cmd}` : p.milestone.cmd, `${p.key}-milestone`);
+    dropTree(m, src); git('worktree', 'prune'); run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', m.wt, head]);
+    job(m, src, p.setup ? `(${p.setup}\n) && ${p.milestone.cmd}` : p.milestone.cmd, `${DIR}/milestones/${p.key}-milestone.log`, p.milestone.timeoutSec);
     log(null, 'milestone', p.key, 'run', head.slice(0, 10), green ? `${p.milestone.tag ?? 'green'} at ${green.slice(0, 10)}` : 'no green commit yet', `pid ${m.pid}`);
     save();
   }
+}
+
+// ---- p.land: the merge queue, one batch at a time per project. An agent hands its finished branch over (status in_review,
+// label cfg.landLabel, property `branch`) instead of merging it; baton merges every ready branch of the project, in board
+// order, onto origin/<base> in a clean worktree <worktrees>/_land (`--no-ff`, the subject names the issue), runs p.land.cmd
+// once on the whole batch and pushes it. Red: probe() bisects the batch's prefixes; the longest green one lands, the branch
+// that turns it red goes back to its agent with the output, the ones after it wait for the next batch. A branch that is
+// missing or does not merge goes back at once. Logs in state/lands/, state in state/lands.json =
+// { <project key>: { batch: [{ key, branch }], tips: [sha per prefix], g, r, k, logs, wt, pid, log } }. ----
+const LANDS = `${DIR}/lands.json`;
+// The issue goes back to the agent that holds it (active again, so its footprint stays reserved): the run resumes and reads why.
+function bounce(p, i, why, text) {
+  comment(i.identifier, bounced(p.base, why, text));
+  try_(() => relabel(i.identifier, 'remove', CFG.landLabel));
+  t('issue', 'update', i.identifier, '--status=active'); i.status = 'in_progress';
+  log(null, 'land', p.key, 'back', i.identifier, why.split('\n')[0].slice(0, 200));
+}
+function landTry(p, l, src) {
+  const cmd = `git checkout -q --detach ${l.tips[l.k]} && ${p.setup ? `(${p.setup}\n) && ` : ''}${p.land.cmd}`;
+  job(l, src, cmd, (l.logs[l.k] = `${DIR}/lands/${p.key}-${l.k}.log`), p.land.timeoutSec, { BATON_ISSUE: 'land' });
+  log(null, 'land', p.key, 'gate', l.batch.slice(0, l.k).map((b) => b.key).join(','), `pid ${l.pid}`);
+}
+// Returns the keys of the projects with a batch in work: the milestone waits for them.
+function lands(projects, issues, byKey) {
+  const ls = try_(() => JSON.parse(readFileSync(LANDS, 'utf8'))) ?? {}, save = () => writeFileSync(LANDS, JSON.stringify(ls));
+  for (const p of Object.values(projects).filter((x) => x.land)) {
+    const l = ls[p.key] ??= {}, src = source(p), git = (...a) => run('git', ['-C', l.wt, ...a]);
+    if (l.pid) {
+      if (alive(l)) continue;
+      const read = (f) => try_(() => readFileSync(f, 'utf8')) ?? '', ok = read(`${l.log}.exit`).trim() === '0';
+      Object.assign(l, probe(l, ok), { pid: null }); save(); // a throw below must not run this gate's verdict twice
+      log(null, 'land', p.key, ok ? 'green' : 'red', l.batch.slice(0, ok ? l.g : l.r).map((b) => b.key).join(','));
+      if (l.k != null) { landTry(p, l, src); save(); continue; }
+      const landed = l.batch.slice(0, l.g), sha = l.tips[l.g];
+      if (landed.length && try_(() => git('push', '-q', 'origin', `${sha}:refs/heads/${p.base}`)) == null)
+        log(null, 'land', p.key, 'push failed', `(origin/${p.base} moved?)`, landed.map((b) => b.key).join(','), 'wait for the next batch');
+      else for (const b of landed) {
+        t('issue', 'update', b.key, '--status=done'); if (byKey[b.key]) byKey[b.key].status = 'done';
+        comment(b.key, `Bridge: landed on \`${p.base}\` at ${sha.slice(0, 10)}${landed.length > 1 ? `, in one gated batch with ${landed.filter((x) => x !== b).map((x) => x.key).join(', ')}` : ''}.`);
+        try_(() => git('push', '-q', 'origin', '--delete', b.branch));
+        log(null, 'land', p.key, 'landed', b.key, sha.slice(0, 10));
+      }
+      const red = l.batch[l.r - 1], i = red && byKey[red.key];
+      if (i) bounce(p, i, `the gate \`${p.land.cmd}\` is red on \`${p.base}\` + ${l.batch.slice(0, l.r).map((b) => `\`${b.branch}\``).join(' + ')}` +
+        (l.r > 1 ? ', green without this branch' : '') + `. Log: ${l.logs[l.r]}`, read(l.logs[l.r]).split('\n').slice(-40).join('\n').slice(-3000));
+      dropTree(l, src); ls[p.key] = {}; save(); continue;
+    }
+    const ready = landable(issues.filter((x) => projects[x.project_id] === p), p.land.max ?? 5);
+    if (!ready.length) continue;
+    Object.assign(l, { wt: wtDir(p, src, '_land'), batch: [], tips: [], logs: {} });
+    dropTree(l, src); run('git', ['-C', src, 'fetch', '-q', '--prune', 'origin']); run('git', ['-C', src, 'worktree', 'prune']);
+    run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', l.wt, `origin/${p.base}`]);
+    l.tips.push(git('rev-parse', 'HEAD'));
+    for (const i of ready) {
+      const branch = i.properties?.branch?.trim();
+      let why = !branch ? 'the issue has no `branch` property (`lific issue update <KEY> --set branch=<name>`)'
+        : !try_(() => git('rev-parse', '-q', '--verify', `origin/${branch}^{commit}`)) ? `origin has no branch \`${branch}\`` : null;
+      if (!why) try { git('merge', '-q', '--no-ff', '-m', `Merge ${branch} (${i.identifier})`, `origin/${branch}`); } catch (e) {
+        try_(() => git('merge', '--abort'));
+        why = `\`${branch}\` does not merge cleanly onto \`origin/${p.base}\`${l.batch.length ? ` + ${l.batch.map((b) => `\`${b.branch}\``).join(' + ')} (they land before it)` : ''}:\n${(e.stdout || e.message).slice(-1500)}`;
+      }
+      if (why) { bounce(p, i, why); continue; }
+      l.batch.push({ key: i.identifier, branch }); l.tips.push(git('rev-parse', 'HEAD'));
+    }
+    if (!l.batch.length) { dropTree(l, src); ls[p.key] = {}; save(); continue; }
+    Object.assign(l, { g: 0, r: l.batch.length + 1, k: l.batch.length });
+    landTry(p, l, src); save();
+  }
+  return new Set(Object.entries(ls).filter(([, l]) => l.pid).map(([k]) => k));
 }
 
 let last = { snap: null, refused: {}, empties: 0, at: 0 }; // the last wave: the issues it left, what stays refused, rounds in a row that started nothing, when
@@ -540,8 +629,11 @@ function tick() {
   // never offered.
   const held = issues.filter(flying);
   const free = issues.filter((x) => x.status === 'todo' && !whyNot(x, [], statusOf));
-  // The milestone does not hold the waves: it runs detached, and only while nothing runs and nothing of the project waits.
-  milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p), statusOf);
+  // The land queue and the milestone do not hold the waves: they run detached. The milestone only while nothing runs and
+  // nothing of the project waits, to start or to land.
+  const landing = lands(projects, issues, byKey);
+  milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p) &&
+    !landing.has(p.key) && !landable(issues.filter((x) => projects[x.project_id] === p)).length, statusOf);
   const room = slots(issues);
   if (room <= 0) return;
   // Asked about every issue once: what an earlier wave did not start stays out until the issues change or a person

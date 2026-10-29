@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, probe, bounced, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -406,6 +406,40 @@ test('milestone red: stage labels, the bisect verdict, the stage output, the iss
   assert.match(f.description, /compile error: boom[\s\S]*Logs: m.log, b.log/);
   assert.equal(fixIssue(p, '9'.repeat(40), 'lint', null, '', []).title, 'Milestone red: lint');
   assert.match(fixIssue(p, '9'.repeat(40), null, null, 'timeout', ['m.log']).title, /without a red stage/);
+});
+
+test('land queue: in review with the land label, not for a person, board order, capped', () => {
+  const r = (key, labels, status = 'in_review') => ({ ...issue(key, {}, labels), status });
+  const all = [r('A-1', ['land']), r('A-2', []), r('A-3', ['land', 'needs-human']), r('A-4', ['land'], 'in_progress'), r('A-5', ['land']), r('A-6', ['land'])];
+  assert.deepEqual(landable(all).map((i) => i.identifier), ['A-1', 'A-5', 'A-6']);
+  assert.deepEqual(landable(all, 2).map((i) => i.identifier), ['A-1', 'A-5']);
+});
+
+test('land queue: the batch is gated once when green; when red, its prefixes are bisected to the branch that turns it red', () => {
+  // Simulate a batch of n branches where branch `bad` (1-based, 0 = none) turns the gate red; count the gate runs.
+  const settle = (n, bad) => {
+    let s = { g: 0, r: n + 1, k: n }, runs = 0;
+    while (s.k != null) runs++, s = probe(s, !bad || s.k < bad);
+    return { lands: s.g, back: s.r <= n ? s.r : null, runs };
+  };
+  assert.deepEqual(settle(4, 0), { lands: 4, back: null, runs: 1 }); // one gate for four branches
+  assert.deepEqual(settle(1, 1), { lands: 0, back: 1, runs: 1 });
+  assert.deepEqual(settle(4, 1), { lands: 0, back: 1, runs: 3 });
+  assert.deepEqual(settle(4, 3), { lands: 2, back: 3, runs: 3 }); // A-1, A-2 land; A-4 waits for the next batch
+  assert.deepEqual(settle(5, 5), { lands: 4, back: 5, runs: 4 });
+  for (let n = 1; n <= 8; n++) for (let bad = 1; bad <= n; bad++) {
+    const x = settle(n, bad);
+    assert.equal(x.back, bad); assert.equal(x.lands, bad - 1);
+    assert.ok(x.runs <= 1 + Math.ceil(Math.log2(n)));
+  }
+});
+
+test('land queue: a bounced issue is told why, how to hand it over again, and the gate output', () => {
+  const c = bounced('master', 'the gate is red', 'FAIL: x');
+  assert.match(c, /^Bridge: not landed: the gate is red\./);
+  assert.match(c, /`origin\/master`/); assert.match(c, /`in_review` with the label `land`/);
+  assert.match(c, /```\nFAIL: x\n```/);
+  assert.doesNotMatch(bounced('master', 'no branch'), /```/);
 });
 
 test('a one-shot model call has no tools and no MCP servers, so its single turn is the answer', () => {
