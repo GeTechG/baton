@@ -264,6 +264,9 @@ export function fixIssue(p, sha, stage, c, text, logs) {
 // p.land: the issues (of one project) ready to land, in board order: in review, labelled cfg.landLabel, not for a person; at most `max`.
 export const landable = (issues, max = Infinity) => issues.filter((i) => i.status === 'in_review' &&
   i.labels.includes(CFG.landLabel) && !i.labels.includes(CFG.humanLabel)).slice(0, max);
+// Start a batch now? `ready` issues wait, the oldest for `waited` seconds. While another issue of the project is in work
+// (`busy`), its branch may come within `hold` seconds and share the gate: wait, unless `max` are ready already.
+export const landDue = (ready, waited, busy, hold = 0, max = 5) => ready > 0 && (!busy || ready >= max || waited >= hold);
 // The bisect over a batch of n branches merged one after another: prefix k = the base plus the first k of them. g = the
 // longest prefix known green (0 = the base itself), r = the shortest known red (n + 1 = none). After prefix k came out ok
 // or not -> the next state; k = null once settled: prefix g lands, and branch r, if r <= n, is the one that turns it red.
@@ -544,10 +547,15 @@ function lands(projects, issues, byKey) {
       const red = l.batch[l.r - 1], i = red && byKey[red.key];
       if (i) bounce(p, i, `the gate \`${p.land.cmd}\` is red on \`${p.base}\` + ${l.batch.slice(0, l.r).map((b) => `\`${b.branch}\``).join(' + ')}` +
         (l.r > 1 ? ', green without this branch' : '') + `. Log: ${l.logs[l.r]}`, read(l.logs[l.r]).split('\n').slice(-40).join('\n').slice(-3000));
-      dropTree(l, src); ls[p.key] = {}; save(); continue;
+      dropTree(l, src); ls[p.key] = { seen: l.seen }; save(); continue;
     }
-    const ready = landable(issues.filter((x) => projects[x.project_id] === p), p.land.max ?? 5);
-    if (!ready.length) continue;
+    // seen: key -> when it was first seen ready (kept across batches: an issue that waited out a gate goes in the next one at once).
+    const mine = issues.filter((x) => projects[x.project_id] === p), ready = landable(mine, p.land.max ?? 5), now = Date.now();
+    l.seen = Object.fromEntries(landable(mine).map((i) => [i.identifier, l.seen?.[i.identifier] ?? now])); save();
+    if (!landDue(ready.length, (now - Math.min(now, ...Object.values(l.seen))) / 1000, mine.some((x) => x.status === 'in_progress'), p.land.holdSec, p.land.max ?? 5)) {
+      if (ready.length) log(`land${p.key}`, 'land', p.key, 'hold', ready.map((i) => i.identifier).join(','), `up to ${p.land.holdSec}s for the issues in work`);
+      continue;
+    }
     Object.assign(l, { wt: wtDir(p, src, '_land'), batch: [], tips: [], logs: {} });
     dropTree(l, src); run('git', ['-C', src, 'fetch', '-q', '--prune', 'origin']); run('git', ['-C', src, 'worktree', 'prune']);
     run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', l.wt, `origin/${p.base}`]);
@@ -563,7 +571,7 @@ function lands(projects, issues, byKey) {
       if (why) { bounce(p, i, why); continue; }
       l.batch.push({ key: i.identifier, branch }); l.tips.push(git('rev-parse', 'HEAD'));
     }
-    if (!l.batch.length) { dropTree(l, src); ls[p.key] = {}; save(); continue; }
+    if (!l.batch.length) { dropTree(l, src); ls[p.key] = { seen: l.seen }; save(); continue; }
     Object.assign(l, { g: 0, r: l.batch.length + 1, k: l.batch.length });
     landTry(p, l, src); save();
   }

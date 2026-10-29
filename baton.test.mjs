@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, probe, bounced, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -413,6 +413,15 @@ test('land queue: in review with the land label, not for a person, board order, 
   const all = [r('A-1', ['land']), r('A-2', []), r('A-3', ['land', 'needs-human']), r('A-4', ['land'], 'in_progress'), r('A-5', ['land']), r('A-6', ['land'])];
   assert.deepEqual(landable(all).map((i) => i.identifier), ['A-1', 'A-5', 'A-6']);
   assert.deepEqual(landable(all, 2).map((i) => i.identifier), ['A-1', 'A-5']);
+});
+
+test('land queue: a batch waits up to holdSec for the issues in work, not when nothing else runs or max are ready', () => {
+  assert.equal(landDue(0, 0, false, 300), false); // nothing ready
+  assert.equal(landDue(1, 0, false, 300), true); // nobody else could join: no wait
+  assert.equal(landDue(1, 60, true, 300), false); // others in work: hold
+  assert.equal(landDue(1, 300, true, 300), true); // held long enough
+  assert.equal(landDue(5, 0, true, 300, 5), true); // a full batch does not wait
+  assert.equal(landDue(1, 0, true), true); // no holdSec: as before
 });
 
 test('land queue: the batch is gated once when green; when red, its prefixes are bisected to the branch that turns it red', () => {

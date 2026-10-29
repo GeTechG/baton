@@ -130,11 +130,14 @@ as a paragraph headed `Project guidance:`. The agents' own instructions stay pro
 batch instead of once per issue, plus again after every rebase onto a base another issue has just moved; and agents
 never wait for it.
 ```json
-"land": { "cmd": "tools/check release --merge-gate", "max": 5, "timeoutSec": 3600 }
+"land": { "cmd": "tools/check release --merge-gate", "max": 5, "timeoutSec": 3600, "holdSec": 300 }
 ```
 An issue is ready to land when it is `in_review`, has the label `land` (`landLabel`; create it in the project) and no
 `needs-human`, and its `branch` property names a branch on origin; what has to happen before that (a review, human QA)
-is the repo's rules. While no batch of the project is in work, baton takes the ready issues (board order, at most `max`,
+is the repo's rules. While no batch of the project is in work, baton takes the ready issues; with `holdSec`, only once the oldest of
+them has waited that long (seconds, counted from when baton first saw it ready, a gate it waited out included) while
+another issue of the project is `active`, so a branch handed over a minute later shares the gate (none `active`, or
+`max` ready: no wait; `bridge.log` says `land <KEY> hold`). It takes them (board order, at most `max`,
 default 5), merges their branches one after another onto `origin/<base>` in a clean worktree `<worktrees>/_land`
 (`git merge --no-ff`, subject `Merge <branch> (<KEY>)`, so the milestone's bisect finds the issue) and runs `cmd` there,
 detached like the milestone, after the project's `setup`, under `timeout timeoutSec` (default 2400). The gate sees the
@@ -147,7 +150,7 @@ comment with the gate's output; the branches after it wait for the next batch. A
 does not merge cleanly onto the base and the branches before it goes back at once, the same way. An issue waiting in
 the queue holds no agent and no slot, but keeps its footprint reserved until it lands. The milestone waits while a
 batch runs or an issue waits to land. Logs and state: `state/lands/`, `state/lands.json`; `bridge.log` has a
-`land <KEY> gate|green|red|landed|back|push failed` line for each step.
+`land <KEY> hold|gate|green|red|landed|back|push failed` line for each step.
 
 `milestone` is the gate of the merged tree, for a repo whose per-issue gate leaves some stages to it. baton runs it
 once the project's queue is empty (no agent run is active and no issue of the project waits to start) and `origin/<base>`
