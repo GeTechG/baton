@@ -87,6 +87,15 @@ export function tail(buf, pos) {
 // An in_progress issue: null = its agent is still running | 'park' it (waits on a blocker or a human) | 'start' the
 // next run | 'stuck' = max runs of one agent in a row ended with nothing to show, so a human has to look.
 export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why ? 'park' : n >= max ? 'stuck' : 'start');
+// The part of an agent log one run wrote -> when the account's usage limit it ran into resets (ms), or null if it did
+// not run into one. Claude Code ends such a run with a result `usage_limit_reached`, after a rejected rate_limit_event
+// that carries the reset (s); without that event, 15 minutes.
+export function limitedUntil(text, now) {
+  const es = text.split('\n').map((l) => try_(() => JSON.parse(l))).filter(Boolean);
+  if (!es.some((e) => e.type === 'result' && e.api_error === 'usage_limit_reached')) return null;
+  const at = es.filter((e) => e.type === 'rate_limit_event' && e.rate_limit_info?.status === 'rejected').map((e) => e.rate_limit_info.resetsAt * 1000);
+  return at.length ? Math.max(...at) : now + 15 * 60_000;
+}
 // What an agent process gets: baton's environment, with every AGENT_X variable renamed to X (its own tracker key and
 // GitHub token live in .env under that prefix, so baton itself never runs with them), plus `extra`.
 export const agentEnv = (env, extra = {}) => ({ ...Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('AGENT_'))),
@@ -361,6 +370,7 @@ function start(p, i, runs, a) {
   r.heard = last && Math.max(0, ...last.map((c) => c.id)); rmSync(inbox(i.identifier), { force: true });
   const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
   r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
+  r.from = statSync(logFile).size; // where this run's part of the log starts (limitedUntil)
   const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, '--settings', HOOKS, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
     env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH), BATON_INBOX: inbox(i.identifier),
       BATON_ISSUE: i.identifier, BATON_RUN: runMark(i.identifier, (r.total ?? 0) + 1) }) });
@@ -579,6 +589,7 @@ function lands(projects, issues, byKey) {
 }
 
 let last = { snap: null, refused: {}, empties: 0, at: 0 }; // the last wave: the issues it left, what stays refused, rounds in a row that started nothing, when
+let limit = 0; // until when the usage limit holds every start (ms); a restart forgets it and learns it again from one cut-off run
 function tick() {
   const runs = loadRuns(), { o, agents } = team(loadAgents(), CFG.orchestrator), NOTIFIED = `${DIR}/notified.json`, notified = try_(() => JSON.parse(readFileSync(NOTIFIED, 'utf8'))) ?? [];
   const projects = Object.fromEntries(tj('project', 'list').filter((p) => CFG.projects[p.name])
@@ -616,6 +627,14 @@ function tick() {
   // review, not for an agent) or parks on a blocker or a human. Naming another agent in `agent` hands the issue on:
   // the next run is that agent's. A reviewed, handed-on or parked issue starts the count of fruitless runs afresh.
   for (const i of issues.filter((x) => x.status === 'in_review' && runs[x.identifier]?.n)) { runs[i.identifier].n = 0; saveRuns(runs); }
+  // A run the usage limit cut off is not one of them: it does not count, and no agent or wave starts until the limit
+  // resets (it is the account's: every other run would hit it too).
+  for (const [key, r] of Object.entries(runs).filter(([, x]) => x.from != null && !alive(x))) {
+    const until = limitedUntil(try_(() => readFileSync(`${DIR}/logs/${key}.log`).subarray(r.from).toString('utf8')) ?? '', Date.now());
+    if (until) { r.n = Math.max(0, r.n - 1); limit = Math.max(limit, until); log(null, 'limit', key, 'run not counted, agents wait until', new Date(limit).toISOString().slice(11, 16), 'UTC'); }
+    delete r.from; saveRuns(runs);
+  }
+  const limited = Date.now() < limit;
   for (const i of issues.filter((x) => x.status === 'in_progress')) {
     const r = runs[i.identifier], name = holder(i, r), a = agents.find((x) => x.name === name);
     const why = whyNot(i, [], statusOf) ?? (a ? null : `no agent "${name}"`), step = runStep(alive(r), why, r?.agent === name ? r.n : 0);
@@ -628,7 +647,7 @@ function tick() {
       comment(i.identifier, `Bridge: ${r.n} runs of ${name} in a row ended without closing the issue, a hand-off, a blocker or a question. Log: ${DIR}/logs/${i.identifier}.log`);
       relabel(i.identifier, 'add', CFG.humanLabel); i.labels.push(CFG.humanLabel);
       log(null, 'stuck', i.identifier, `after ${r.n} runs`);
-    } else if (step === 'start') start(projects[i.project_id], i, runs, a);
+    } else if (step === 'start' && !limited) start(projects[i.project_id], i, runs, a);
   }
 
   // Wave: whenever fewer than cfg.maxWave issues are in work, the orchestrator fills the free slots from the startable
@@ -643,7 +662,7 @@ function tick() {
   milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p) &&
     !landing.has(p.key) && !landable(issues.filter((x) => projects[x.project_id] === p)).length, statusOf);
   const room = slots(issues);
-  if (room <= 0) return;
+  if (room <= 0 || limited) return;
   // Asked about every issue once: what an earlier wave did not start stays out until the issues change or a person
   // comments on it, so the next wave gets the ones behind it at once.
   const same = snapshot(issues) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');

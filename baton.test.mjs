@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -31,6 +31,19 @@ test('run decision: leave a live agent alone, park a waiting issue, restart a qu
   assert.equal(runStep(false, null, 0, 3), 'start');
   assert.equal(runStep(false, null, 2, 3), 'start');
   assert.equal(runStep(false, null, 3, 3), 'stuck');
+});
+
+test('usage limit: a run it cut off says when it resets; a run that only came close, or failed otherwise, does not', () => {
+  const j = (...es) => es.map((e) => JSON.stringify(e)).join('\n') + '\n', now = 1_000_000;
+  const rl = (status, resetsAt) => ({ type: 'rate_limit_event', rate_limit_info: { status, resetsAt, rateLimitType: 'five_hour' } });
+  const hit = { type: 'result', subtype: 'success', is_error: true, api_error_status: 429, api_error: 'usage_limit_reached' };
+  assert.equal(limitedUntil(j(rl('rejected', 1793298000), { type: 'assistant' }, hit), now), 1793298000000);
+  assert.equal(limitedUntil(j(rl('allowed_warning', 1793290000), rl('rejected', 1793298000), hit), now), 1793298000000);
+  assert.equal(limitedUntil(j(hit), now), now + 15 * 60_000); // no reset in the log
+  assert.equal(limitedUntil(j(rl('allowed_warning', 1793298000), { type: 'result', subtype: 'success' }), now), null);
+  assert.equal(limitedUntil(j({ type: 'result', is_error: true, api_error: 'overloaded' }), now), null);
+  assert.equal(limitedUntil('{"type":"result","api_error":"usage_li', now), null); // a line still being written
+  assert.equal(limitedUntil('', now), null);
 });
 
 test('agent env: AGENT_X becomes X and overrides, baton-only values stay out of reach of the rename', () => {
