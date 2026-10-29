@@ -134,8 +134,9 @@ never wait for it.
 ```json
 "land": { "cmd": "tools/check release --merge-gate", "max": 5, "timeoutSec": 3600, "holdSec": 300 }
 ```
-An issue is ready to land when it is `in_review`, has the label `land` (`landLabel`; create it in the project) and no
-`needs-human`, and its `branch` property names a branch on origin; what has to happen before that (a review, human QA)
+An issue is ready to land when it is `in_review`, has the label `land` (`landLabel`; create it in the project), no
+`needs-human` and no blocker that is not `done` (a blocker in the queue lands first, the issue in the batch after it;
+`bridge.log`: `land <KEY> waits for <blockers>`), and its `branch` property names a branch on origin; what has to happen before that (a review, human QA)
 is the repo's rules. While no batch of the project is in work, baton takes the ready issues; with `holdSec`, only once the oldest of
 them has waited that long (seconds, counted from when baton first saw it ready, a gate it waited out included) while
 another issue of the project is `active`, so a branch handed over a minute later shares the gate (none `active`, or

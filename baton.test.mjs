@@ -426,6 +426,9 @@ test('land queue: in review with the land label, not for a person, board order, 
   const all = [r('A-1', ['land']), r('A-2', []), r('A-3', ['land', 'needs-human']), r('A-4', ['land'], 'in_progress'), r('A-5', ['land']), r('A-6', ['land'])];
   assert.deepEqual(landable(all).map((i) => i.identifier), ['A-1', 'A-5', 'A-6']);
   assert.deepEqual(landable(all, 2).map((i) => i.identifier), ['A-1', 'A-5']);
+  const status = { 'B-1': 'done', 'B-2': 'todo', 'A-1': 'in_review' }, statusOf = (k) => status[k];
+  const blocked = [r('A-1', ['land']), { ...r('A-7', ['land']), blockedBy: ['B-1'] }, { ...r('A-8', ['land']), blockedBy: ['B-1', 'B-2'] }, { ...r('A-9', ['land']), blockedBy: ['A-1'] }];
+  assert.deepEqual(landable(blocked, Infinity, statusOf).map((i) => i.identifier), ['A-1', 'A-7']); // A-9 lands after A-1, not with it
 });
 
 test('land queue: a batch waits up to holdSec for the issues in work, not when nothing else runs or max are ready', () => {

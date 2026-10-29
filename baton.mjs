@@ -270,9 +270,10 @@ export function fixIssue(p, sha, stage, c, text, logs) {
       `Stage output:\n\n\`\`\`\n${text}\n\`\`\`\n\nLogs: ${logs.join(', ')}` };
 }
 
-// p.land: the issues (of one project) ready to land, in board order: in review, labelled cfg.landLabel, not for a person; at most `max`.
-export const landable = (issues, max = Infinity) => issues.filter((i) => i.status === 'in_review' &&
-  i.labels.includes(CFG.landLabel) && !i.labels.includes(CFG.humanLabel)).slice(0, max);
+// p.land: the issues (of one project) ready to land, in board order: in review, labelled cfg.landLabel, not for a person,
+// every blocker done (a blocker in the same queue lands first: what waits on it goes in the batch after); at most `max`.
+export const landable = (issues, max = Infinity, statusOf = () => 'done') => issues.filter((i) => i.status === 'in_review' &&
+  i.labels.includes(CFG.landLabel) && !i.labels.includes(CFG.humanLabel) && i.blockedBy.every((k) => statusOf(k) === 'done')).slice(0, max);
 // Start a batch now? `ready` issues wait, the oldest for `waited` seconds. While another issue of the project is in work
 // (`busy`), its branch may come within `hold` seconds and share the gate: wait, unless `max` are ready already.
 export const landDue = (ready, waited, busy, hold = 0, max = 5) => ready > 0 && (!busy || ready >= max || waited >= hold);
@@ -535,7 +536,7 @@ function landTry(p, l, src) {
   log(null, 'land', p.key, 'gate', l.batch.slice(0, l.k).map((b) => b.key).join(','), `pid ${l.pid}`);
 }
 // Returns the keys of the projects with a batch in work: the milestone waits for them.
-function lands(projects, issues, byKey) {
+function lands(projects, issues, byKey, statusOf) {
   const ls = try_(() => JSON.parse(readFileSync(LANDS, 'utf8'))) ?? {}, save = () => writeFileSync(LANDS, JSON.stringify(ls));
   for (const p of Object.values(projects).filter((x) => x.land)) {
     const l = ls[p.key] ??= {}, src = source(p), git = (...a) => run('git', ['-C', l.wt, ...a]);
@@ -560,8 +561,10 @@ function lands(projects, issues, byKey) {
       dropTree(l, src); ls[p.key] = { seen: l.seen }; save(); continue;
     }
     // seen: key -> when it was first seen ready (kept across batches: an issue that waited out a gate goes in the next one at once).
-    const mine = issues.filter((x) => projects[x.project_id] === p), ready = landable(mine, p.land.max ?? 5), now = Date.now();
-    l.seen = Object.fromEntries(landable(mine).map((i) => [i.identifier, l.seen?.[i.identifier] ?? now])); save();
+    const mine = issues.filter((x) => projects[x.project_id] === p), ready = landable(mine, p.land.max ?? 5, statusOf), now = Date.now();
+    for (const i of landable(mine).filter((x) => x.blockedBy.some((k) => statusOf(k) !== 'done')))
+      log(`land${i.identifier}`, 'land', i.identifier, 'waits for', i.blockedBy.filter((k) => statusOf(k) !== 'done').join(','));
+    l.seen = Object.fromEntries(landable(mine, Infinity, statusOf).map((i) => [i.identifier, l.seen?.[i.identifier] ?? now])); save();
     if (!landDue(ready.length, (now - Math.min(now, ...Object.values(l.seen))) / 1000, mine.some((x) => x.status === 'in_progress'), p.land.holdSec, p.land.max ?? 5)) {
       if (ready.length) log(`land${p.key}`, 'land', p.key, 'hold', ready.map((i) => i.identifier).join(','), `up to ${p.land.holdSec}s for the issues in work`);
       continue;
@@ -658,9 +661,9 @@ function tick() {
   const free = issues.filter((x) => x.status === 'todo' && !whyNot(x, [], statusOf));
   // The land queue and the milestone do not hold the waves: they run detached. The milestone only while nothing runs and
   // nothing of the project waits, to start or to land.
-  const landing = lands(projects, issues, byKey);
+  const landing = lands(projects, issues, byKey, statusOf);
   milestones(projects, (p) => !issues.some((x) => x.status === 'in_progress') && !free.some((x) => projects[x.project_id] === p) &&
-    !landing.has(p.key) && !landable(issues.filter((x) => projects[x.project_id] === p)).length, statusOf);
+    !landing.has(p.key) && !landable(issues.filter((x) => projects[x.project_id] === p), Infinity, statusOf).length, statusOf);
   const room = slots(issues);
   if (room <= 0 || limited) return;
   // Asked about every issue once: what an earlier wave did not start stays out until the issues change or a person

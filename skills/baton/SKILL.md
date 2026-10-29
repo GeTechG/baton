@@ -41,7 +41,8 @@ fighting the scheduler.
   an issue there, linked as a blocker of the one that needs it. All filed as `todo`, none started by hand.
 - **Land queue** (when the repo's `AGENTS.md` says baton lands changes): do not merge into the base branch yourself.
   Push the branch, `lific issue update <KEY> --set branch=<branch>`, then `--status in_review --add-label land`, and stop.
-  baton merges every ready branch of the project in one batch, runs the landing gate once and pushes; you need not
+  baton merges every ready branch of the project in one batch (a branch whose issue has a blocker not yet `done` waits
+  for it, so hand over even while one is open), runs the landing gate once and pushes; you need not
   rebase onto a base that moved. If the batch is red because of your branch, or it does not merge, the issue comes back
   `active` with the gate's output in a `Bridge:` comment: fix it in the same issue, push, hand it over again. A failure
   found after landing (the milestone) is a new issue.
