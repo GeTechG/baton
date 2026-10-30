@@ -120,8 +120,8 @@ issue that waits on it. A configured project baton does not see is in `bridge.lo
 
 `sharedPaths` lists paths nearly every issue names but writes only its own piece of (its own folder under them, its own
 line in a shared file), so a rebase merges the edits, e.g. `["openspec/", "docs/tech-debt.md"]`. When footprints are
-compared, a path in the list or under it does not count on either side; a footprint left with only shared paths counts
-as empty (it overlaps everything).
+compared, a path in the list or under it does not count on either side, so a footprint of only shared paths overlaps
+nothing; an empty footprint overlaps everything.
 
 `setup` is a shell command baton runs in an issue's worktree right after creating it, before the agent starts (so also
 after the `fresh` label; not on later runs in the kept worktree): what the repo needs before a session and its MCP

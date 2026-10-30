@@ -86,14 +86,17 @@ test('overlaps: path prefix, directory, disjoint, empty is conservative', () => 
   assert.ok(overlaps([], ['src/a.js']));
 });
 
-test('overlaps: shared paths count on neither side, only shared paths is empty', () => {
+test('overlaps: shared paths count on neither side, only shared paths overlaps nothing, empty still overlaps all', () => {
   const shared = ['openspec/', 'docs/tech-debt.md'];
   const a = ['openspec/changes/a/', 'docs/tech-debt.md', 'src/a.js'], b = ['openspec', 'docs/tech-debt.md', 'src/b.js'];
   assert.ok(overlaps(a, b));
   assert.ok(!overlaps(a, b, shared));
   assert.ok(!overlaps(['docs/', 'src/a.js'], ['docs/tech-debt.md', 'src/b.js'], shared));
   assert.ok(overlaps(['docs/'], ['docs/other.md', 'src/b.js'], shared));
-  assert.ok(overlaps(['openspec/changes/a/', 'docs/tech-debt.md'], ['src/b.js'], shared));
+  assert.ok(!overlaps(['openspec/changes/a/', 'docs/tech-debt.md'], ['src/b.js'], shared));
+  assert.ok(!overlaps(['docs/tech-debt.md'], ['openspec/'], shared));
+  assert.ok(overlaps(['docs/tech-debt.md'], [], shared));
+  assert.ok(overlaps(null, ['src/b.js'], shared));
   assert.ok(overlaps(['openspecs/x.md'], ['src/b.js', 'openspecs/'], shared)); // a sibling is not under openspec/
 });
 

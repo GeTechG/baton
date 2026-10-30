@@ -59,12 +59,13 @@ const try_ = (f) => { try { return f(); } catch { return null; } };
 // punctuation stripped, prose (anything with a space) dropped.
 export const list = (s) => (s ?? '').split(/[,\n]/).map((x) => x.replace(/[`'"*]/g, '').trim().replace(/^- /, '').replace(/[.;:]+$/, ''))
   .filter((x) => x && !/\s/.test(x));
-// A project's `sharedPaths` (each issue writes its own piece there, a rebase merges them) do not count on either side; a
-// footprint left with only them is empty, so it overlaps everything.
+// A project's `sharedPaths` (each issue writes its own piece there, a rebase merges them) do not count on either side, so
+// a footprint of only them overlaps nothing. An empty footprint says nothing about what the issue touches: it overlaps everything.
 export const overlaps = (a, b, shared = []) => {
-  const dir = (s) => s.replace(/\/+$/, ''), own = (fp) => (fp ?? []).filter((x) => !shared.some((s) => dir(x) === dir(s) || x.startsWith(`${dir(s)}/`)));
+  if (!a?.length || !b?.length) return true;
+  const dir = (s) => s.replace(/\/+$/, ''), own = (fp) => fp.filter((x) => !shared.some((s) => dir(x) === dir(s) || x.startsWith(`${dir(s)}/`)));
   [a, b] = [own(a), own(b)];
-  return !a.length || !b.length || a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
+  return a.some((x) => b.some((y) => x.startsWith(y) || y.startsWith(x)));
 };
 // A tracker issue in the scheduler's terms: text property `footprint` (null = not set yet: baton estimates it), text
 // property `agent` (who holds it; an agent hands the issue on by naming another), native blockers, and Lific's `active`
