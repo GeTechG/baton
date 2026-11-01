@@ -1,7 +1,7 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch } from './baton.mjs';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -70,6 +70,37 @@ test('project setup: nothing runs without the field; with it the command runs in
   } finally { rmSync(wt, { recursive: true, force: true }); }
   // The failed issue gets the human label and no run: the next tick parks it.
   assert.equal(runStep(false, whyNot(issue('OS-1', { fp: 'src/a.js' }, ['needs-human']), [], () => 'done'), 0, 3), 'park');
+});
+
+test('a worktree of a submodule repo: its own core.worktree when the extension would make it inherit the common one', async () => {
+  const { mkdtempSync, rmSync, existsSync, realpathSync, writeFileSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { execFileSync } = await import('node:child_process');
+  const dir = realpathSync(mkdtempSync(`${tmpdir()}/baton-`)), git = (cwd, ...a) => execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'protocol.file.allow=always', ...a], { encoding: 'utf8', stdio: 'pipe' }).trim();
+  try {
+    for (const r of ['lib', 'app']) { execFileSync('git', ['init', '-q', `${dir}/${r}`]); writeFileSync(`${dir}/${r}/f`, 'x'); git(`${dir}/${r}`, 'add', 'f'); git(`${dir}/${r}`, 'commit', '-qm', 'a'); }
+    git(`${dir}/app`, 'submodule', '--quiet', 'add', `${dir}/lib`, 'vendor/lib');
+    const sub = `${dir}/app/vendor/lib`, own = (wt) => git(wt, 'config', '--worktree', '--get', 'core.worktree');
+    const sound = (wt) => { assert.equal(git(wt, 'rev-parse', '--show-toplevel'), wt); assert.equal(git(wt, 'status', '--short'), ''); git(wt, 'submodule', 'status'); };
+
+    addTree(sub, `${dir}/off`, 'HEAD'); // extension off: git ignores the common value in a linked worktree, and it stays off
+    sound(`${dir}/off`);
+    assert.throws(() => git(sub, 'config', '--local', '--get', 'extensions.worktreeConfig'), 'the extension is not turned on');
+    git(sub, 'worktree', 'remove', '--force', `${dir}/off`);
+
+    git(sub, 'config', 'extensions.worktreeConfig', 'true');
+    git(sub, 'worktree', 'add', '-q', '--detach', `${dir}/plain`, 'HEAD'); // the bug: git sees the module's git dir as the tree
+    assert.notEqual(git(`${dir}/plain`, 'rev-parse', '--show-toplevel'), `${dir}/plain`);
+    addTree(sub, `${dir}/on`, 'HEAD');
+    sound(`${dir}/on`);
+    assert.equal(own(`${dir}/on`), `${dir}/on`);
+    assert.equal(git(sub, 'rev-parse', '--show-toplevel'), sub, 'the checkout itself still works');
+    git(sub, 'worktree', 'remove', '--force', `${dir}/on`);
+    assert.equal(existsSync(`${dir}/on`), false);
+
+    git(`${dir}/lib`, 'config', 'extensions.worktreeConfig', 'true'); // an ordinary repo: nothing inherited, nothing written
+    addTree(`${dir}/lib`, `${dir}/plain2`, 'HEAD');
+    sound(`${dir}/plain2`);
+    assert.throws(() => own(`${dir}/plain2`));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('first prompt: the agent instructions and the issue; project guidance only when the project has it', () => {
