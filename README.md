@@ -36,7 +36,8 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   its model and instructions, which are extra guidance for the choice. Files are read every tick: no restart to edit one.
 - **Runs:** one git worktree per issue, kept until the issue closes, and one agent session per agent on it, so a
   later run resumes the conversation and reuses the build output. The worktree hangs off the project's local checkout
-  (`path`) at `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. The agent process starts
+  (`path`) at `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. A checkout that is a git submodule works too: when the repo has `extensions.worktreeConfig` on, a
+  new worktree would inherit the module's `core.worktree` (git would see every file as deleted), so baton gives it its own (`git config --worktree`), also for the land and milestone worktrees. The agent process starts
   in that worktree, so everything the repo ships for coding agents (`.claude/skills`, `.claude/settings.json` with its
   hooks, `.mcp.json`, `CLAUDE.md`) is loaded as in an interactive session there. An `active` issue is the agent's to
   move: baton starts it again whenever its process has ended, parks it back to `todo` (it is offered again in the next

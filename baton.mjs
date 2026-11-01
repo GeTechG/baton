@@ -313,12 +313,21 @@ function source(p) {
   return dir;
 }
 const wtDir = (p, src, name) => resolve(p.worktrees ? resolve(ROOT, p.worktrees) : `${src}.wt`, name);
+// A new detached worktree. With extensions.worktreeConfig on, a linked worktree inherits core.worktree from the common
+// config (a submodule's has one), relative to its own git dir: git would then work on the module's git dir, not on `wt`.
+// With the extension off git ignores that value there and `config --worktree` refuses to run, so there is nothing to do.
+export function addTree(src, wt, ref) {
+  const get = (...a) => try_(() => run('git', ['-C', src, 'config', '--local', ...a]));
+  run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', wt, ref]);
+  if (get('--get', 'core.worktree') && get('--type=bool', '--get', 'extensions.worktreeConfig') === 'true')
+    run('git', ['-C', wt, 'config', '--worktree', 'core.worktree', wt]);
+}
 // null = p.setup failed: no worktree is left (the next attempt makes and prepares a new one) and the issue waits for a human.
 function worktree(p, key) { // detached at origin/<base>; the agent creates or checks out its own branch
   const src = source(p), wt = wtDir(p, src, key), git = (...a) => run('git', ['-C', src, ...a]);
   if (existsSync(wt)) return wt;
   git('fetch', '-q', 'origin'); git('worktree', 'prune');
-  git('worktree', 'add', '-q', '--detach', wt, `origin/${p.base}`);
+  addTree(src, wt, `origin/${p.base}`);
   const err = setup(p, key, wt, src);
   if (err == null) return wt;
   try_(() => git('worktree', 'remove', '--force', wt)); rmSync(wt, { recursive: true, force: true });
@@ -519,7 +528,7 @@ function milestones(projects, idle, statusOf) {
     const head = git('rev-parse', `origin/${p.base}`), green = p.milestone.tag ? git('rev-parse', '-q', '--verify', `refs/tags/${p.milestone.tag}^{commit}`) : m.green;
     if (!milestoneDue(true, head, green, m.tried, (m.filed ?? []).some((k) => !CLOSED.includes(statusOf(k))))) continue;
     Object.assign(m, { sha: head, good: green, tried: head, filed: [], queue: [], stage: null, wt: wtDir(p, src, '_milestone') });
-    dropTree(m, src); git('worktree', 'prune'); run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', m.wt, head]);
+    dropTree(m, src); git('worktree', 'prune'); addTree(src, m.wt, head);
     job(m, src, p.setup ? `(${p.setup}\n) && ${p.milestone.cmd}` : p.milestone.cmd, `${DIR}/milestones/${p.key}-milestone.log`, p.milestone.timeoutSec);
     log(null, 'milestone', p.key, 'run', head.slice(0, 10), green ? `${p.milestone.tag ?? 'green'} at ${green.slice(0, 10)}` : 'no green commit yet', `pid ${m.pid}`);
     save();
@@ -582,7 +591,7 @@ function lands(projects, issues, byKey, statusOf) {
     }
     Object.assign(l, { wt: wtDir(p, src, '_land'), batch: [], tips: [], logs: {} });
     dropTree(l, src); run('git', ['-C', src, 'fetch', '-q', '--prune', 'origin']); run('git', ['-C', src, 'worktree', 'prune']);
-    run('git', ['-C', src, 'worktree', 'add', '-q', '--detach', l.wt, `origin/${p.base}`]);
+    addTree(src, l.wt, `origin/${p.base}`);
     l.tips.push(git('rev-parse', 'HEAD'));
     for (const i of ready) {
       const branch = i.properties?.branch?.trim();
