@@ -138,7 +138,8 @@ as a paragraph headed `Project guidance:`. The agents' own instructions stay pro
 batch instead of once per issue, plus again after every rebase onto a base another issue has just moved; and agents
 never wait for it.
 ```json
-"land": { "cmd": "tools/check release --merge-gate", "max": 5, "timeoutSec": 3600, "holdSec": 300 }
+"land": { "cmd": "tools/check release --merge-gate", "max": 5, "timeoutSec": 3600, "holdSec": 300,
+          "failed": "^FAIL: (.+)$", "bisect": "tools/check release --merge-gate --stage=\"$BATON_STAGE\"" }
 ```
 An issue is ready to land when it is `in_review`, has the label `land` (`landLabel`; create it in the project), no
 `needs-human` and no blocker that is not `done` (a blocker in the queue lands first, the issue in the batch after it;
@@ -153,7 +154,12 @@ detached like the milestone, after the project's `setup`, under `timeout timeout
 batch as one change against `origin/<base>`. Green: baton pushes the merged commit to `<base>` (a plain push: if the base
 has moved meanwhile, it is rejected and the batch is tried again from the start), sets each issue `done` with a comment,
 and deletes its branch on origin (`bridge.log`: `land <project> branch kept <branch>` if that fails). Red: the batch's prefixes (the base plus its first k branches) are bisected, each with
-the full `cmd`, so at most 1 + log2(n) gate runs; the longest green prefix lands as above, the branch that turns it red goes
+the full `cmd`, so at most 1 + log2(n) gate runs. With `failed` and `bisect` set (as for the milestone), a red batch
+whose output names its red stages (`failed`: a regex, capture group 1 = a stage's label, one per line) is bisected on
+those stages only: each later prefix runs `bisect` once per red stage, `BATON_STAGE` set, and is green when every one
+exits 0 (`bridge.log`: `land <KEY> gate … stages <labels>`). The green prefix then lands without a full gate of its
+own: its other stages were green on the whole batch, and what that misses the milestone catches. A red batch that
+names no stage (a timeout, a failed `setup`) is bisected with the full `cmd`. The longest green prefix lands as above, the branch that turns it red goes
 back to its agent: the issue is `active` again (its footprint stays reserved; this may take the wave past `maxWave` for a while), loses the label, and gets a `Bridge:`
 comment with the gate's output; the branches after it wait for the next batch. A branch that is missing on origin or
 does not merge cleanly onto the base and the branches before it goes back at once, the same way. An issue waiting in
