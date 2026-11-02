@@ -1,7 +1,8 @@
 // node --test baton.test.mjs — baton's pure scheduling logic (no tracker, no GitHub).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { execFileSync } from 'node:child_process';
+import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -491,6 +492,21 @@ test('land queue: the batch is gated once when green; when red, its prefixes are
     assert.equal(x.back, bad); assert.equal(x.lands, bad - 1);
     assert.ok(x.runs <= 1 + Math.ceil(Math.log2(n)));
   }
+});
+
+test('land queue: a red batch is bisected on its red stages only, when bisect and failed are set', () => {
+  const land = { cmd: 'gate', bisect: 'echo "[$BATON_STAGE]"', failed: '^\\s*✗ FAIL\\s+(.+)$' };
+  const out = '  ✓ pass  a\n  ✗ FAIL  render — it\'s (web)\n  ✗ FAIL  b\n  ✗ FAIL  b\n';
+  assert.deepEqual(landStages(land, out), ["render — it's (web)", 'b']); // each once, in order
+  assert.deepEqual(landStages({ ...land, bisect: undefined }, out), []); // no bisect: the full gate as before
+  assert.deepEqual(landStages({ ...land, failed: undefined }, out), []);
+  assert.deepEqual(landStages(land, 'timeout\n'), []); // a red run that names no stage: the full gate
+  assert.equal(landCmd(land, []), 'gate');
+  assert.equal(landCmd({ cmd: 'gate' }, ['b']), 'gate');
+  // One run of bisect per stage, BATON_STAGE set and quoted for sh; a red one stops the probe.
+  assert.equal(execFileSync('sh', ['-c', landCmd(land, landStages(land, out))], { encoding: 'utf8' }), "[render — it's (web)]\n[b]\n");
+  assert.throws(() => execFileSync('sh', ['-c', landCmd({ ...land, bisect: 'echo "$BATON_STAGE"; false' }, ['x', 'y'])], { stdio: 'pipe' }),
+    (e) => e.stdout.toString() === 'x\n');
 });
 
 test('land queue: a bounced issue is told why, how to hand it over again, and the gate output', () => {

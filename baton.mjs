@@ -284,11 +284,17 @@ export const landDue = (ready, waited, busy, hold = 0, max = 5) => ready > 0 && 
 // The bisect over a batch of n branches merged one after another: prefix k = the base plus the first k of them. g = the
 // longest prefix known green (0 = the base itself), r = the shortest known red (n + 1 = none). After prefix k came out ok
 // or not -> the next state; k = null once settled: prefix g lands, and branch r, if r <= n, is the one that turns it red.
-// Every prefix is tried with the full gate, so the green one is the exact tree that lands.
+// The first run is the whole batch under the full gate; the later ones run landCmd().
 export function probe(s, ok) {
   const g = ok ? s.k : s.g, r = ok ? s.r : s.k;
   return { ...s, g, r, k: r - g > 1 ? Math.floor((g + r) / 2) : null };
 }
+// The command a land probe runs. With p.land.bisect and p.land.failed set, once the whole batch came out red on named
+// stages, a prefix is tried on those stages only: p.land.bisect once per stage, BATON_STAGE set. The green prefix then
+// lands without a full gate of its own: its other stages were green in the whole batch, and what that misses is the milestone's.
+export const landStages = (land, out) => (land.bisect ? redStages(out, land.failed) : []);
+export const landCmd = (land, stages = []) => (!stages.length || !land.bisect ? land.cmd
+  : stages.map((st) => `(BATON_STAGE='${st.replace(/'/g, "'\\''")}'; export BATON_STAGE\n${land.bisect}\n)`).join(' && '));
 // The comment on an issue the land queue sends back to its agent.
 export const bounced = (base, why, text = '') => `Bridge: not landed: ${why}. Fix it in this issue (the branch is still yours: ` +
   `merge or rebase onto \`origin/${base}\` if needed), push, then hand it over again: status \`in_review\` with the label \`${CFG.landLabel}\`.` +
@@ -541,7 +547,7 @@ function milestones(projects, idle, statusOf) {
 // once on the whole batch and pushes it. Red: probe() bisects the batch's prefixes; the longest green one lands, the branch
 // that turns it red goes back to its agent with the output, the ones after it wait for the next batch. A branch that is
 // missing or does not merge goes back at once. Logs in state/lands/, state in state/lands.json =
-// { <project key>: { batch: [{ key, branch }], tips: [sha per prefix], g, r, k, logs, wt, pid, log } }. ----
+// { <project key>: { batch: [{ key, branch }], tips: [sha per prefix], g, r, k, stages, logs, wt, pid, log } }. ----
 const LANDS = `${DIR}/lands.json`;
 // The issue goes back to the agent that holds it (active again, so its footprint stays reserved): the run resumes and reads why.
 function bounce(p, i, why, text) {
@@ -551,9 +557,10 @@ function bounce(p, i, why, text) {
   log(null, 'land', p.key, 'back', i.identifier, why.split('\n')[0].slice(0, 200));
 }
 function landTry(p, l, src) {
-  const cmd = `git checkout -q --detach ${l.tips[l.k]} && ${p.setup ? `(${p.setup}\n) && ` : ''}${p.land.cmd}`;
+  const stages = l.k < l.batch.length ? l.stages ?? [] : [];
+  const cmd = `git checkout -q --detach ${l.tips[l.k]} && ${p.setup ? `(${p.setup}\n) && ` : ''}${landCmd(p.land, stages)}`;
   job(l, src, cmd, (l.logs[l.k] = `${DIR}/lands/${p.key}-${l.k}.log`), p.land.timeoutSec, { BATON_ISSUE: 'land' });
-  log(null, 'land', p.key, 'gate', l.batch.slice(0, l.k).map((b) => b.key).join(','), `pid ${l.pid}`);
+  log(null, 'land', p.key, 'gate', l.batch.slice(0, l.k).map((b) => b.key).join(','), ...(stages.length ? [`stages ${stages.join(', ')}`] : []), `pid ${l.pid}`);
 }
 // Returns the keys of the projects with a batch in work: the milestone waits for them.
 function lands(projects, issues, byKey, statusOf) {
@@ -563,6 +570,7 @@ function lands(projects, issues, byKey, statusOf) {
     if (l.pid) {
       if (alive(l)) continue;
       const read = (f) => try_(() => readFileSync(f, 'utf8')) ?? '', ok = read(`${l.log}.exit`).trim() === '0';
+      if (l.k === l.batch.length) l.stages = ok ? [] : landStages(p.land, read(l.log)); // the whole batch's red stages
       Object.assign(l, probe(l, ok), { pid: null }); save(); // a throw below must not run this gate's verdict twice
       log(null, 'land', p.key, ok ? 'green' : 'red', l.batch.slice(0, ok ? l.g : l.r).map((b) => b.key).join(','));
       if (l.k != null) { landTry(p, l, src); save(); continue; }
@@ -576,8 +584,9 @@ function lands(projects, issues, byKey, statusOf) {
         log(null, 'land', p.key, 'landed', b.key, sha.slice(0, 10));
       }
       const red = l.batch[l.r - 1], i = red && byKey[red.key];
+      const st = l.stages ?? [];
       if (i) bounce(p, i, `the gate \`${p.land.cmd}\` is red on \`${p.base}\` + ${l.batch.slice(0, l.r).map((b) => `\`${b.branch}\``).join(' + ')}` +
-        (l.r > 1 ? ', green without this branch' : '') + `. Log: ${l.logs[l.r]}`, read(l.logs[l.r]).split('\n').slice(-40).join('\n').slice(-3000));
+        (st.length ? ` (${st.map((x) => `\`${x}\``).join(', ')})` : '') + (l.r > 1 ? `, ${st.length ? 'those stages ' : ''}green without this branch` : '') + `. Log: ${l.logs[l.r]}`, read(l.logs[l.r]).split('\n').slice(-40).join('\n').slice(-3000));
       dropTree(l, src); ls[p.key] = { seen: l.seen }; save(); continue;
     }
     // seen: key -> when it was first seen ready (kept across batches: an issue that waited out a gate goes in the next one at once).
