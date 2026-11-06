@@ -7,7 +7,7 @@
 // the agent there (one worktree per issue, one session per agent on it, kept until the issue closes; its `agent`
 // property names who holds it and its run log shows what the agent does).
 // Hard gates the orchestrator cannot override: backlog, native "blocked by" links, cfg.humanLabel, an assignment to a
-// person, overlapping `footprint`. How a change reaches the base branch and who sets done is the repo's and the agent's business,
+// person, overlapping `footprint` (unless the project sets `overlap`). How a change reaches the base branch and who sets done is the repo's and the agent's business,
 // unless the project has a land queue (cfg.projects.*.land): then baton merges, gates and pushes the branches agents hand over.
 // ponytail: prefix-match footprints (minus a project's sharedPaths), 100 open issues per project and status, one
 // `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
@@ -109,15 +109,18 @@ export const holder = (i, r, dflt = 'worker') => i.agent ?? r?.agent ?? dflt;
 // The config's projects that baton's own tracker identity does not see (listed = `project list` names). Lific hides such
 // a project, and drops its issues from every `blocked_by` too, so a blocker there does not hold anything.
 export const unseen = (cfgProjects, listed) => Object.keys(cfgProjects).filter((n) => !listed.includes(n));
+// The issues of `flight` (same project) whose footprint overlaps i's.
+export const clashes = (i, flight, shared = []) => flight.filter((f) => f !== i && f.project_id === i.project_id && overlaps(f.footprint, i.footprint, shared)).map((f) => f.identifier);
 // null = may start now; otherwise why not. flight = issues already held by agents or picked for this wave. statusOf(key) -> issue status.
-export function whyNot(i, flight, statusOf, shared = []) {
+// A project with `overlap` lets footprints overlap: the land queue merges the branches and a conflict goes back to an agent.
+export function whyNot(i, flight, statusOf, shared = [], overlap = false) {
   const open = i.blockedBy.filter((k) => statusOf(k) !== 'done');
   if (open.length) return `blocked by ${open}`;
   if (i.labels.includes(CFG.humanLabel)) return CFG.humanLabel;
   // Lific's assignment: an issue nobody is assigned is the agents'; "any person" or named people keep it for humans.
   if (i.needs_human || i.assignees?.length) return `for ${i.assignees?.length ? i.assignees.map((a) => `@${a.username}`) : 'a person'}`;
-  const clash = flight.find((f) => f.project_id === i.project_id && overlaps(f.footprint, i.footprint, shared));
-  return clash ? `footprint overlaps ${clash.identifier}` : null;
+  const clash = overlap ? [] : clashes(i, flight, shared);
+  return clash.length ? `footprint overlaps ${clash[0]}` : null;
 }
 // The open issues as the last wave left them. A change of this (a slot came free, a new board order, an edited
 // issue) ends every refusal.
@@ -160,9 +163,10 @@ export function offer(todo, ok, parked, max = CFG.maxWave) {
 // Free slots: cfg.maxWave issues may be in work (in_progress) at once.
 export const slots = (issues, max = CFG.maxWave) => max - issues.filter((i) => i.status === 'in_progress').length;
 // One WAITING issue as the orchestrator sees it (r = its run, if it was started before). Its blockers come with their
-// status: a description that still says "waits for X" must not outweigh the tracker.
+// status: a description that still says "waits for X" must not outweigh the tracker. i.shares: the issues in work or
+// waiting its footprint overlaps (a project with `overlap` only).
 export const offered = (i, repo, r, statusOf) => `## ${i.identifier} [${repo}] ${i.title}\nstatus: ${r ? `started earlier by ${r.agent}, parked` : 'todo (not started)'}; ` +
-  `labels: ${i.labels.join(', ') || '-'}; footprint: ${i.footprint.join(', ') || '-'}; blockers: ${i.blockedBy.map((k) => `${k} (${statusOf(k)})`).join(', ') || 'none'}\n${i.description ?? ''}` +
+  `labels: ${i.labels.join(', ') || '-'}; footprint: ${i.footprint.join(', ') || '-'}${i.shares?.length ? ` (overlaps ${i.shares.join(', ')})` : ''}; blockers: ${i.blockedBy.map((k) => `${k} (${statusOf(k)})`).join(', ') || 'none'}\n${i.description ?? ''}` +
   (i.said?.length ? `\nComments from people since (latest last; they may settle what the description leaves open):\n${i.said.map((c) => `- ${c}`).join('\n')}` : '');
 // What people wrote on a waiting issue, for the orchestrator (a decision is often given in a comment, not in the
 // description): the last `n` comments not by the agents' tracker user, oldest first, one capped line each.
@@ -278,6 +282,10 @@ export function fixIssue(p, sha, stage, c, text, logs) {
 // every blocker done (a blocker in the same queue lands first: what waits on it goes in the batch after); at most `max`.
 export const landable = (issues, max = Infinity, statusOf = () => 'done') => issues.filter((i) => i.status === 'in_review' &&
   i.labels.includes(CFG.landLabel) && !i.labels.includes(CFG.humanLabel) && i.blockedBy.every((k) => statusOf(k) === 'done')).slice(0, max);
+// A branch that does not merge onto the base + the batch's branches before it, but does onto the base alone, waits for the
+// next batch (those branches will be on the base by then, or back with their agents) instead of going back to its agent,
+// who could not rebase onto branches that have not landed yet.
+export const landDefer = (alone, before) => before > 0 && alone;
 // Start a batch now? `ready` issues wait, the oldest for `waited` seconds. While another issue of the project is in work
 // (`busy`), its branch may come within `hold` seconds and share the gate: wait, unless `max` are ready already.
 export const landDue = (ready, waited, busy, hold = 0, max = 5) => ready > 0 && (!busy || ready >= max || waited >= hold);
@@ -469,7 +477,9 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room)
     'Start a task only if it makes sense now: leave out one that logically follows another waiting or unfinished task, or would ' +
     'collide with one in work or one you start. Starting nothing is a valid answer.\n' +
     'Every WAITING task has already passed the scheduler\'s own checks: all its blockers are closed (they are listed with their ' +
-    'status) and its footprint overlaps no task that is in work. Do not check these two again from descriptions or comments: ' +
+    'status) and its footprint overlaps no task that is in work, unless its footprint line says `(overlaps …)`: its project lets ' +
+    'such tasks run side by side and an agent resolves the merge conflicts, so an overlap alone is no reason to wait; leave it out ' +
+    'only if it would redo or undo the other task\'s work. Do not check these two again from descriptions or comments: ' +
     'text that says a task still waits for a closed task is out of date. A closed task is finished and nothing collides with it.\n\n' +
     `# Agents\n${agents.map((a) => `- ${a.name}: ${a.description || '(no description)'}`).join('\n')}\n\n` +
     `# Project rules\n${rules.join('\n\n')}\n\n` +
@@ -608,6 +618,8 @@ function lands(projects, issues, byKey, statusOf) {
         : !try_(() => git('rev-parse', '-q', '--verify', `origin/${branch}^{commit}`)) ? `origin has no branch \`${branch}\`` : null;
       if (!why) try { git('merge', '-q', '--no-ff', '-m', `Merge ${branch} (${i.identifier})`, `origin/${branch}`); } catch (e) {
         try_(() => git('merge', '--abort'));
+        const alone = try_(() => git('merge-tree', '--write-tree', `origin/${p.base}`, `origin/${branch}`)) != null; // exit 1 = conflicts
+        if (landDefer(alone, l.batch.length)) { log(null, 'land', i.identifier, 'next batch', `conflicts with ${l.batch.map((b) => b.key).join(',')}`); continue; }
         why = `\`${branch}\` does not merge cleanly onto \`origin/${p.base}\`${l.batch.length ? ` + ${l.batch.map((b) => `\`${b.branch}\``).join(' + ')} (they land before it)` : ''}:\n${(e.stdout || e.message).slice(-1500)}`;
       }
       if (why) { bounce(p, i, why); continue; }
@@ -702,15 +714,16 @@ function tick() {
   const same = snapshot(issues) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
   let refused = stillRefused(last.refused, same, (k) => JSON.stringify(byKey[k].said ??= said(tj('comment', 'list', k))));
   const offering = () => offer(free.filter((x) => x.status === 'todo' && !(x.identifier in refused)), (x, taken) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
-    !whyNot(x, [...held, ...taken], statusOf, projects[x.project_id].sharedPaths)), (x) => runs[x.identifier])
+    !whyNot(x, [...held, ...taken], statusOf, projects[x.project_id].sharedPaths, projects[x.project_id].overlap)), (x) => runs[x.identifier])
     .map((x) => (x.said ??= said(tj('comment', 'list', x.identifier)), x));
   let waiting = offering();
+  for (const x of waiting) if (projects[x.project_id].overlap) x.shares = clashes(x, [...held, ...waiting], projects[x.project_id].sharedPaths);
   if (!waiting.length && Object.keys(refused).length && again(last.empties, (Date.now() - last.at) / 1000)) refused = {}, waiting = offering();
   if (!waiting.length) return;
   if (!o) throw new Error(`no orchestrator agent "${CFG.orchestrator ?? 'orchestrator'}" in agents/`);
   const out = orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room), wave = picks(out, waiting.map((i) => i.identifier), agents.map((a) => a.name));
   for (const { key, agent } of wave) {
-    const i = byKey[key], p = projects[i.project_id], why = slots(issues) <= 0 ? 'no free slot' : whyNot(i, held, statusOf, p.sharedPaths);
+    const i = byKey[key], p = projects[i.project_id], why = slots(issues) <= 0 ? 'no free slot' : whyNot(i, held, statusOf, p.sharedPaths, p.overlap);
     if (why) { log(null, 'wait', key, why); continue; }
     if (freshStep(i, false, 0) === 'on-assign') restartFresh(p, i, runs);
     t('issue', 'update', key, '--status=active', `--set=agent=${agent}`); i.status = 'in_progress'; i.agent = agent;

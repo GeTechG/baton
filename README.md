@@ -28,7 +28,7 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
   "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
   named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (Haiku-estimated if
-  missing) that overlaps an issue of the same project that is `active` or `in_review`.
+  missing) that overlaps an issue of the same project that is `active` or `in_review` (not in a project with `overlap`, below).
 - **Agents:** one JSON file each (`name`, `model`, `description`, `instructions`) in `agents/` — `worker`, a
   project-independent worker that takes the process from the repo's `AGENTS.md`, and `orchestrator` — plus your own in
   `local/agents/` (gitignored; `agents` in `config.json` names another directory; a file with the same `name` replaces
@@ -114,7 +114,7 @@ baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `s
 One entry in `config.json` `projects`, keyed by the Lific project name: `repo` and `base` (any branch; where the
 footprint tree and `AGENTS.md` are read from and what issue worktrees start at), and optionally `path` (your local
 checkout of the repo — issue worktrees are made from it; without it baton keeps its own clone under `state/src/`),
-`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `sharedPaths`, `setup`, `instructions`, `land` and `milestone`.
+`worktrees` (where they go; default `<path>.wt`), `footprintHint`, `sharedPaths`, `overlap`, `setup`, `instructions`, `land` and `milestone`.
 baton's Lific user must be a member of the project (`lific member add --project <PREFIX> --user <baton's user> --role maintainer`):
 Lific hides a project from a non-member, and its issues from every `blocked_by`, so a blocker there would not hold the
 issue that waits on it. A configured project baton does not see is in `bridge.log` as `unseen <name>`.
@@ -123,6 +123,12 @@ issue that waits on it. A configured project baton does not see is in `bridge.lo
 line in a shared file), so a rebase merges the edits, e.g. `["openspec/", "docs/tech-debt.md"]`. When footprints are
 compared, a path in the list or under it does not count on either side, so a footprint of only shared paths overlaps
 nothing; an empty footprint overlaps everything.
+
+`overlap: true` drops the footprint gate for the project: issues whose footprints overlap may be in work at once, and
+the merge conflicts are the agents' to resolve (meant for a project with `land`). Footprints are still estimated and
+compared: the orchestrator sees, next to a waiting issue's footprint, the issues in work or waiting it overlaps
+(`footprint: src/a.js (overlaps APP-3)`), and is told an overlap alone is no reason to wait, only work that would redo
+or undo the other issue's.
 
 `setup` is a shell command baton runs in an issue's worktree right after creating it, before the agent starts (so also
 after the `fresh` label; not on later runs in the kept worktree): what the repo needs before a session and its MCP
@@ -162,10 +168,12 @@ own: its other stages were green on the whole batch, and what that misses the mi
 names no stage (a timeout, a failed `setup`) is bisected with the full `cmd`. The longest green prefix lands as above, the branch that turns it red goes
 back to its agent: the issue is `active` again (its footprint stays reserved; this may take the wave past `maxWave` for a while), loses the label, and gets a `Bridge:`
 comment with the gate's output; the branches after it wait for the next batch. A branch that is missing on origin or
-does not merge cleanly onto the base and the branches before it goes back at once, the same way. An issue waiting in
+does not merge cleanly onto the base goes back at once, the same way; one that merges onto the base alone but not onto
+the batch's branches before it waits for the next batch instead (`bridge.log`: `land <KEY> next batch`): by then they
+are on the base, and if it still does not merge, it goes back to its agent, who rebases onto them. An issue waiting in
 the queue holds no agent and no slot, but keeps its footprint reserved until it lands. The milestone waits while a
 batch runs or an issue waits to land. Logs and state: `state/lands/`, `state/lands.json`; `bridge.log` has a
-`land <KEY> hold|gate|green|red|landed|back|push failed` line for each step.
+`land <KEY> hold|gate|green|red|landed|back|next batch|push failed` line for each step.
 
 `milestone` is the gate of the merged tree, for a repo whose per-issue gate leaves some stages to it. baton runs it
 once the project's queue is empty (no agent run is active and no issue of the project waits to start) and `origin/<base>`

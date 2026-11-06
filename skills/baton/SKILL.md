@@ -32,7 +32,8 @@ fighting the scheduler.
 
 - **Never set an issue `active` yourself.** File it as `todo`; baton starts it when it is ready. Handing on an issue you
   hold is fine: it stays in flight under its new agent.
-- Stay inside the issue's `footprint`. It is how baton keeps parallel agents off each other's files. Once you know
+- Stay inside the issue's `footprint`. It is how baton keeps parallel agents off each other's files (a project may let
+  them overlap: then another issue may be changing the same files, and a merge conflict is yours to resolve). Once you know
   which paths the change really touches, narrow it to them (`--set footprint=…`): other issues can then start beside
   yours. Never widen it; what needs a path outside it is a separate issue.
 - Don't touch an issue worktree (`<checkout>.wt/<KEY>`) that is not yours.
@@ -45,8 +46,9 @@ fighting the scheduler.
   Push the branch, `lific issue update <KEY> --set branch=<branch>`, then `--status in_review --add-label land`, and stop.
   baton merges every ready branch of the project in one batch (a branch whose issue has a blocker not yet `done` waits
   for it, so hand over even while one is open), runs the landing gate once and pushes; you need not
-  rebase onto a base that moved. If the batch is red because of your branch, or it does not merge, the issue comes back
-  `active` with the gate's output in a `Bridge:` comment: fix it in the same issue, push, hand it over again. A failure
+  rebase onto a base that moved. If the batch is red because of your branch, or it does not merge onto the base, the
+  issue comes back `active` with the gate's output in a `Bridge:` comment: fix it (a conflict: merge or rebase onto
+  `origin/<base>` and resolve it) in the same issue, push, hand it over again. A failure
   found after landing (the milestone) is a new issue.
 - An issue that asks for a review is done when the review comes back clean: its findings are fixed in the same issue
   and the review is run again, not filed as new issues. Write "read-only" in the issue if you want only the report.
@@ -62,6 +64,7 @@ now and which agent takes each. An issue can be picked only when all of these ho
 - it has no `needs-human` label,
 - it is not assigned to a person (`--assign human` or usernames keep an issue for people; unassigned is the agents'),
 - its `footprint` does not overlap an issue of the same project that is `active` or `in_review` (path-prefix match),
+  unless the project allows overlapping footprints,
 - if it has not been started yet, it is among the first few such issues in the board's manual order (drag an issue up to
   have it considered sooner).
 

@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -143,6 +143,8 @@ test('ready decision', () => {
   assert.equal(whyNot(lib, [t1], statusOf), null); // same path, other project
   assert.equal(whyNot(t3, [t1], statusOf), 'footprint overlaps OS-1');
   assert.equal(whyNot(t3, [t1], statusOf, ['src/a.js']), null);
+  assert.equal(whyNot(t3, [t1], statusOf, [], true), null); // a project with `overlap`: the land queue and an agent merge them
+  assert.deepEqual(clashes(t3, [t1, t2, t3, lib]), ['OS-1']); // not itself, not another project
   assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-12', 'OS-13'] }), [], statusOf), 'blocked by OS-12');
   assert.equal(whyNot(issue('OS-4', { fp: 'src/c.js', bb: ['OS-13'] }), [], statusOf), null);
   assert.equal(whyNot(issue('OS-5', { fp: 'src/d.js' }, ['gate:spec', 'needs-human']), [], statusOf), 'needs-human');
@@ -302,6 +304,17 @@ test('wave: the window is filled greedily in board order with issues that overla
   assert.deepEqual(keys(offer(todo, ok, () => false, 3)), ['OS-2', 'OS-6', 'OS-8']); // OS-3, OS-4, OS-7 clash with OS-2, OS-5 with work
   assert.deepEqual(keys(offer(todo.slice(1), ok, () => false, 2)), ['OS-3', 'OS-6']); // a skipped one stays first next wave
   assert.deepEqual(keys(offer(todo, ok, (i) => i.identifier === 'OS-4', 2)), ['OS-4', 'OS-2', 'OS-6']); // parked: offered anyway
+});
+
+test('wave: in a project with `overlap`, overlapping issues are offered side by side and the orchestrator is told what they share', () => {
+  const run = { ...issue('OS-1', { fp: 'src/a.js' }), status: 'in_progress' };
+  const todo = [issue('OS-2', { fp: 'src/a.js' }), issue('OS-3', { fp: 'src/a.js, src/b.js' }), issue('OS-4', { fp: 'src/c.js' })];
+  const ok = (i, taken) => !whyNot(i, [run, ...taken], () => 'done', [], true), keys = (l) => l.map((i) => i.identifier);
+  const waiting = offer(todo, ok, () => false, 3);
+  assert.deepEqual(keys(waiting), ['OS-2', 'OS-3', 'OS-4']);
+  const i = { ...waiting[1], title: 'T', shares: clashes(waiting[1], [run, ...waiting]) };
+  assert.equal(offered(i, 'o/r', undefined, () => 'done'),
+    '## OS-3 [o/r] T\nstatus: todo (not started); labels: -; footprint: src/a.js, src/b.js (overlaps OS-1, OS-2); blockers: none\n');
 });
 
 test('wave: a round that started nothing is asked again from the top after each pause, a limited number of times', () => {
@@ -473,6 +486,12 @@ test('land queue: a batch waits up to holdSec for the issues in work, not when n
   assert.equal(landDue(1, 300, true, 300), true); // held long enough
   assert.equal(landDue(5, 0, true, 300, 5), true); // a full batch does not wait
   assert.equal(landDue(1, 0, true), true); // no holdSec: as before
+});
+
+test('land queue: a branch that conflicts only with the branches before it in the batch waits for the next batch', () => {
+  assert.equal(landDefer(true, 2), true); // merges onto the base alone: the next batch, after those land
+  assert.equal(landDefer(false, 2), false); // conflicts with the base itself: back to its agent now
+  assert.equal(landDefer(false, 0), false); // first in the batch: the base is all it conflicts with
 });
 
 test('land queue: the batch is gated once when green; when red, its prefixes are bisected to the branch that turns it red', () => {
