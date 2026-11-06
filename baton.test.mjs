@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -477,6 +477,26 @@ test('land queue: in review with the land label, not for a person, board order, 
   const status = { 'B-1': 'done', 'B-2': 'todo', 'A-1': 'in_review' }, statusOf = (k) => status[k];
   const blocked = [r('A-1', ['land']), { ...r('A-7', ['land']), blockedBy: ['B-1'] }, { ...r('A-8', ['land']), blockedBy: ['B-1', 'B-2'] }, { ...r('A-9', ['land']), blockedBy: ['A-1'] }];
   assert.deepEqual(landable(blocked, Infinity, statusOf).map((i) => i.identifier), ['A-1', 'A-7']); // A-9 lands after A-1, not with it
+});
+
+test('land queue: a branch is not taken while the run that handed it over is still going (its Stop hooks may still commit)', () => {
+  const r = (key) => ({ ...issue(key, {}, ['land']), status: 'in_review' });
+  const running = (k) => k === 'A-1';
+  assert.deepEqual(landable([r('A-1'), r('A-2')], Infinity, () => 'done', running).map((i) => i.identifier), ['A-2']);
+  assert.deepEqual(landable([r('A-1'), r('A-2')], Infinity, () => 'done', () => false).map((i) => i.identifier), ['A-1', 'A-2']);
+});
+
+test('land queue: commits a run made after its branch landed reopen the issue instead of being dropped with the worktree', () => {
+  assert.equal(lateWork(undefined, 3, 'main', 'feat/x'), null); // not landed by the queue (direct push, a PR): not baton's to judge
+  assert.equal(lateWork('abc123', 0, 'main', 'feat/x'), null); // nothing after the landed tip: the worktree can go
+  assert.equal(lateWork('abc123', null, 'main', 'feat/x'), null); // no worktree to look at
+  const c = lateWork('abc123def0', 2, 'main', 'feat/x');
+  assert.match(c, /^Bridge: /);
+  assert.match(c, /2 commits after `abc123def0`/);
+  assert.match(c, /`feat\/x`/);
+  assert.match(c, /origin\/main/);
+  assert.match(c, /`in_review` with the label `land`/);
+  assert.match(lateWork('abc123def0', 1, 'main', 'feat/x'), /1 commit after/);
 });
 
 test('land queue: a batch waits up to holdSec for the issues in work, not when nothing else runs or max are ready', () => {

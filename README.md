@@ -149,7 +149,7 @@ never wait for it.
 ```
 An issue is ready to land when it is `in_review`, has the label `land` (`landLabel`; create it in the project), no
 `needs-human` and no blocker that is not `done` (a blocker in the queue lands first, the issue in the batch after it;
-`bridge.log`: `land <KEY> waits for <blockers>`), and its `branch` property names a branch on origin; what has to happen before that (a review, human QA)
+`bridge.log`: `land <KEY> waits for <blockers>`), its `branch` property names a branch on origin, and the agent run that handed it over has ended (its `Stop` hooks, a review gate, may still commit; `bridge.log`: `land <KEY> waits for its run to end`); what has to happen before that (a review, human QA)
 is the repo's rules. While no batch of the project is in work, baton takes the ready issues; with `holdSec`, only once the oldest of
 them has waited that long (seconds, counted from when baton first saw it ready, a gate it waited out included) while
 another issue of the project is `active`, so a branch handed over a minute later shares the gate (none `active`, or
@@ -159,7 +159,7 @@ default 5), merges their branches one after another onto `origin/<base>` in a cl
 detached like the milestone, after the project's `setup`, under `timeout timeoutSec` (default 2400). The gate sees the
 batch as one change against `origin/<base>`. Green: baton pushes the merged commit to `<base>` (a plain push: if the base
 has moved meanwhile, it is rejected and the batch is tried again from the start), sets each issue `done` with a comment,
-and deletes its branch on origin (`bridge.log`: `land <project> branch kept <branch>` if that fails). Red: the batch's prefixes (the base plus its first k branches) are bisected, each with
+and deletes its branch on origin (`bridge.log`: `land <project> branch kept <branch>` if that fails). When such an issue's worktree is then cleaned up and holds commits past the branch tip that landed (made after the hand-off), baton does not drop them with it: the issue is `active` again with a `Bridge:` comment asking to push them and hand it over again (`bridge.log`: `land <KEY> reopened`). Red: the batch's prefixes (the base plus its first k branches) are bisected, each with
 the full `cmd`, so at most 1 + log2(n) gate runs. With `failed` and `bisect` set (as for the milestone), a red batch
 whose output names its red stages (`failed`: a regex, capture group 1 = a stage's label, one per line) is bisected on
 those stages only: each later prefix runs `bisect` once per red stage, `BATON_STAGE` set, and is green when every one
@@ -173,7 +173,7 @@ the batch's branches before it waits for the next batch instead (`bridge.log`: `
 are on the base, and if it still does not merge, it goes back to its agent, who rebases onto them. An issue waiting in
 the queue holds no agent and no slot, but keeps its footprint reserved until it lands. The milestone waits while a
 batch runs or an issue waits to land. Logs and state: `state/lands/`, `state/lands.json`; `bridge.log` has a
-`land <KEY> hold|gate|green|red|landed|back|next batch|push failed` line for each step.
+`land <KEY> hold|gate|green|red|landed|back|next batch|push failed|reopened` line for each step.
 
 `milestone` is the gate of the merged tree, for a repo whose per-issue gate leaves some stages to it. baton runs it
 once the project's queue is empty (no agent run is active and no issue of the project waits to start) and `origin/<base>`

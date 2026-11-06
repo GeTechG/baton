@@ -48,7 +48,10 @@ fighting the scheduler.
   for it, so hand over even while one is open), runs the landing gate once and pushes; you need not
   rebase onto a base that moved. If the batch is red because of your branch, or it does not merge onto the base, the
   issue comes back `active` with the gate's output in a `Bridge:` comment: fix it (a conflict: merge or rebase onto
-  `origin/<base>` and resolve it) in the same issue, push, hand it over again. A failure
+  `origin/<base>` and resolve it) in the same issue, push, hand it over again. Hand over only after every review and
+  check; a commit made after the hand-off (a review hook at the end of the turn) is pushed and handed over again. baton
+  lands a branch only once the run that handed it over has ended, and reopens the issue if its worktree then holds
+  commits past what landed. A failure
   found after landing (the milestone) is a new issue.
 - An issue that asks for a review is done when the review comes back clean: its findings are fixed in the same issue
   and the review is run again, not filed as new issues. Write "read-only" in the issue if you want only the report.
