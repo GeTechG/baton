@@ -178,7 +178,8 @@ batch runs or an issue waits to land. Logs and state: `state/lands/`, `state/lan
 `milestone` is the gate of the merged tree, for a repo whose per-issue gate leaves some stages to it. baton runs it
 once the project's queue is empty (no agent run is active and no issue of the project waits to start) and `origin/<base>`
 has moved past the last green commit: `tag` if set (a tag the command itself moves on green), else the last commit baton
-saw green.
+saw green — and only when the land queue merged something since the last milestone (a `Merge <branch> (<KEY>)` commit
+after the last tried commit, else the green one): a direct push of docs or a mechanical edit alone runs none.
 ```json
 "milestone": { "cmd": "make milestone", "tag": "milestone-green", "failed": "^FAIL: (.+)$",
                "bisect": "git bisect start \"$BATON_BAD\" \"$BATON_GOOD\" && git bisect run make stage STAGE=\"$BATON_STAGE\"",
