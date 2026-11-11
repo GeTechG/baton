@@ -254,8 +254,12 @@ export function setup(p, key, wt, src) {
 
 // p.milestone: the gate of the merged tree, run by baton once the project's queue is empty. Due when nothing runs and
 // nothing of the project waits, the base has moved past the last green commit, this commit was not tried yet and every
-// issue the last red milestone filed is closed (a fix has landed, so the next try is not the same red again).
-export const milestoneDue = (idle, head, green, tried, open) => idle && !!head && head !== green && head !== tried && !open;
+// issue the last red milestone filed is closed (a fix has landed, so the next try is not the same red again), and the
+// land queue has merged work since the last try: a direct push (docs, a mechanical edit) alone does not start one.
+export const milestoneDue = (idle, head, green, tried, open, landed = true) => idle && !!head && head !== green && head !== tried && !open && landed;
+// The land queue's merge subject `Merge <branch> (<KEY>)` among the merge subjects since the last milestone; null = the
+// range is unreadable (no commit to start from, history rewritten): count it as work.
+export const landedWork = (subjects) => !subjects || subjects.some((s) => /^Merge \S+ \([A-Z][A-Z0-9]*-\d+\)$/.test(s));
 // The labels of the red stages in a milestone's output: capture group 1 of `re` (p.milestone.failed), each once.
 export const redStages = (out, re) => (re ? [...new Set([...out.matchAll(new RegExp(re, 'gm'))].map((m) => m[1].trim()))] : []);
 // The bisect's verdict: git bisect's own line `<sha> is the first bad commit`; key = the issue the commit's subject names.
@@ -549,7 +553,9 @@ function milestones(projects, idle, statusOf) {
     if (!idle(p) || Date.now() - (fetched[p.key] ?? 0) < 60000) continue;
     fetched[p.key] = Date.now(); git('fetch', '-q', 'origin');
     const head = git('rev-parse', `origin/${p.base}`), green = p.milestone.tag ? git('rev-parse', '-q', '--verify', `refs/tags/${p.milestone.tag}^{commit}`) : m.green;
-    if (!milestoneDue(true, head, green, m.tried, (m.filed ?? []).some((k) => !CLOSED.includes(statusOf(k))))) continue;
+    const since = m.tried ?? green, merges = since && head ? git('log', '--merges', '--format=%s', `${since}..${head}`) : null;
+    if (!milestoneDue(true, head, green, m.tried, (m.filed ?? []).some((k) => !CLOSED.includes(statusOf(k))),
+      landedWork(merges == null ? null : merges.split('\n').filter(Boolean)))) continue;
     Object.assign(m, { sha: head, good: green, tried: head, filed: [], queue: [], stage: null, wt: wtDir(p, src, '_milestone') });
     dropTree(m, src); git('worktree', 'prune'); addTree(src, m.wt, head);
     job(m, src, p.setup ? `(${p.setup}\n) && ${p.milestone.cmd}` : p.milestone.cmd, `${DIR}/milestones/${p.key}-milestone.log`, p.milestone.timeoutSec);

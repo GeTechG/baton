@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -444,6 +444,17 @@ test('milestone due: queue empty, base moved past the green commit, not tried ye
   assert.equal(milestoneDue(true, 'b', 'a', 'b', false), false); // this commit was tried
   assert.equal(milestoneDue(true, 'c', 'a', 'b', true), false); // an issue the last red filed is still open
   assert.equal(milestoneDue(true, null, 'a', null, false), false); // origin unreadable
+  assert.equal(milestoneDue(true, 'b', 'a', null, false, false), false); // only direct pushes since: no baton work
+  assert.equal(milestoneDue(true, 'b', 'a', null, false, true), true); // the land queue merged something since
+});
+
+test('landed work: a land-queue merge among the subjects since the last milestone', () => {
+  assert.equal(landedWork(['Merge change/SPR-697-editor-hlopenal (SPR-697)']), true);
+  assert.equal(landedWork(['docs: tech-debt', 'Merge change/X-1-a (X-1)']), true);
+  assert.equal(landedWork(['docs: tech-debt — strike TD-22 (SPR-682)']), false); // not a merge subject
+  assert.equal(landedWork(["Merge branch 'master' of github.com:a/b"]), false); // a hand merge, no issue key
+  assert.equal(landedWork([]), false);
+  assert.equal(landedWork(null), true); // range unreadable (no green commit yet, history rewritten): run
 });
 
 test('milestone red: stage labels, the bisect verdict, the stage output, the issue', () => {
