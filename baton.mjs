@@ -12,8 +12,7 @@
 // ponytail: prefix-match footprints (minus a project's sharedPaths), 100 open issues per project and status, one
 // `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
 // processes are found in /proc (Linux only),
-// one `comment list` per running and per refused issue per tick, a comment reaches a running agent only after its current tool call,
-// live comment delivery uses Claude Code hooks.
+// one `comment list` per running and per refused issue per tick; the next tool or stop hook delivers queued comments.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
 // cfg.projects.*.land: the merge queue; agents hand over finished branches, baton merges the ready ones in a batch, gates the
 // batch once and pushes it, or bisects it and sends the branch that turns it red back to its agent.
@@ -116,12 +115,21 @@ export function profile(a, fallback = 'claude') {
 // Existing runs from before provider selection belong to Claude Code.
 export const sameAgent = (r, a) => !!a && r?.agent === a.name && (r.provider ?? 'claude') === a.provider;
 const codexReasoning = (effort) => effort ? ['-c', `model_reasoning_effort=${JSON.stringify(effort)}`] : [];
+const shellArg = (s) => "'" + s.replaceAll("'", "'\\''") + "'";
+const inboxEvents = ['PostToolUse', 'Stop'];
+export function inboxSettings(path) {
+  const command = shellArg(path);
+  return {
+    claude: JSON.stringify({ hooks: Object.fromEntries(inboxEvents.map((e) => [e, [{ hooks: [{ type: 'command', command }] }]])) }),
+    codex: inboxEvents.flatMap((e) => ['-c', `hooks.${e}=[{hooks=[{type="command",command=${JSON.stringify(command + ' codex')}}]}]`]),
+  };
+}
 export function runCommand(a, session, first, hooks, prompt, cfg = {}) {
   const model = a.model ? ['--model', a.model] : [];
-  if (a.provider === 'codex') return [...(cfg.codexCmd ?? ['codex', 'exec', '--approve-for-me']), '--json', ...model, ...codexReasoning(a.codexEffort),
+  if (a.provider === 'codex') return [...(cfg.codexCmd ?? ['codex', 'exec', '--approve-for-me']), '--json', ...hooks.codex, ...model, ...codexReasoning(a.codexEffort),
     ...(first ? [] : ['resume', session]), '--', prompt];
   return [...(cfg.cmd ?? ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto']),
-    ...model, first ? '--session-id' : '--resume', session, '--settings', hooks, prompt];
+    ...model, first ? '--session-id' : '--resume', session, '--settings', hooks.claude, prompt];
 }
 // Codex assigns the thread id. Only the current run's own startup event may select the next session.
 export function codexThread(log) {
@@ -238,14 +246,19 @@ export function news(comments, since, mark, bot = CFG.agent.user) {
   const fresh = comments.filter((c) => c.id > since).sort((a, b) => a.id - b.id);
   return { since: Math.max(since, ...fresh.map((c) => c.id)), said: fresh.filter((c) => !(c.author === bot && c.content.includes(mark))).map((c) => `${c.author}: ${c.content}`) };
 }
-// The runs' Claude Code hook (PostToolUse, Stop), a script for `node`: the inbox $BATON_INBOX, if any, goes to the model
-// (exit 2 puts stderr in front of it; on Stop it also keeps the turn going) and is gone. A sub-agent's tool call (agent_id
-// in the hook input) leaves it to the main agent, which holds the issue.
+// Claim the inbox once, even if two tools complete together. Subagents leave it to the issue's main agent.
 export const inboxHook = (node) => `#!${node}
-const fs = require('fs'), f = process.env.BATON_INBOX, read = f + '.read';
+const fs = require('fs'), f = process.env.BATON_INBOX, read = f + '.read.' + process.pid;
 let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => {
-  try { if (!f || JSON.parse(s || '{}').agent_id) return; fs.renameSync(f, read); } catch { return; }
-  process.stderr.write(fs.readFileSync(read, 'utf8')); fs.rmSync(read); process.exitCode = 2;
+  let event;
+  try { event = JSON.parse(s); } catch { return; }
+  if (!f || event.agent_id || !['PostToolUse', 'Stop'].includes(event.hook_event_name)) return;
+  try { fs.renameSync(f, read); } catch (e) { if (e.code === 'ENOENT') return; throw e; }
+  const message = fs.readFileSync(read, 'utf8'); fs.rmSync(read);
+  if (process.argv[2] === 'codex') {
+    console.log(JSON.stringify(event.hook_event_name === 'Stop' ? { decision: 'block', reason: message }
+      : { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: message } }));
+  } else { process.stderr.write(message); process.exitCode = 2; }
 });
 `;
 // Manual board order (what the human dragged higher goes first); issue number breaks ties.
@@ -439,7 +452,7 @@ function start(p, i, runs, a) {
     : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
   // A new run reads every comment on its own; the inbox is for what comes while it runs (listen()).
-  const last = a.provider === 'codex' ? null : try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new
+  const last = try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new
   r.heard = last && Math.max(0, ...last.map((c) => c.id)); rmSync(inbox(i.identifier), { force: true });
   const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a');
   r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
@@ -815,13 +828,14 @@ function tick() {
 
 // Agents call the tracker as plain `lific …`: a wrapper on their PATH (lificWrapper) pins the HTTP backend and marks their comments.
 // It is lific.cjs with `lific` a symlink to it: Node takes the module type from the real path, so require works there.
-// baton-inbox.cjs is the runs' hook (inboxHook), passed with --settings so it adds to the repo's own hooks.
-const HOOKS = JSON.stringify({ hooks: Object.fromEntries(['PostToolUse', 'Stop'].map((e) => [e, [{ hooks: [{ type: 'command', command: `"${DIR}/bin/baton-inbox.cjs"` }] }]])) });
+const HOOKS = inboxSettings(`${DIR}/bin/baton-inbox.cjs`);
 function agentBin() {
   mkdirSync(`${DIR}/bin`, { recursive: true });
   writeFileSync(`${DIR}/bin/lific.cjs`, lificWrapper(process.execPath, CFG.lific.bin)); chmodSync(`${DIR}/bin/lific.cjs`, 0o755);
   rmSync(`${DIR}/bin/lific`, { force: true }); symlinkSync('lific.cjs', `${DIR}/bin/lific`);
   writeFileSync(`${DIR}/bin/baton-inbox.cjs`, inboxHook(process.execPath)); chmodSync(`${DIR}/bin/baton-inbox.cjs`, 0o755);
+  // Open /hooks under the same session flags as a worker so Codex can remember trust for just these handlers.
+  writeFileSync(`${DIR}/bin/review-codex-hooks`, `#!/bin/sh\nexec codex ${HOOKS.codex.map(shellArg).join(' ')} "$@"\n`, { mode: 0o755 });
 }
 const loop = async () => {
   for (; ; await new Promise((r) => setTimeout(r, CFG.tickSec * 1000))) {

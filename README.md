@@ -48,11 +48,11 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
   The local branch the worktree had checked out (it lives in the shared checkout) goes too, once `origin/<base>` contains it;
   an unmerged one stays.
-  **Talking to a running agent:** comment on its issue. For Claude Code, baton checks comments each tick;
-  a new one goes to `state/inbox/<KEY>` unless the run itself wrote it, and a hook baton adds to the run (`--settings`:
-  `PostToolUse` and `Stop`, on top of the repo's own hooks) shows it to the agent after its current tool call, or keeps
-  it from ending its turn before it has read it (`bridge.log`: `tell <KEY> <n> comment`). A sub-agent's tool calls leave it
-  to the main agent. Codex workers read the tracker comments at startup and are prompted to check again before handing off or closing the issue. A comment made while no run is active is read by the next run, as before. All agents share one tracker
+  **Talking to a running agent:** comment on its issue. Each tick, baton queues new comments in `state/inbox/<KEY>`
+  and logs `tell <KEY> <n> comment`. The main worker's `PostToolUse` hook delivers queued comments after a tool call.
+  Its `Stop` hook can keep the turn open to handle a comment. Claude Code loads these hooks with `--settings`;
+  for Codex, trust the two hooks as described under *Choosing Claude Code or Codex*. A worker reads comments
+  made between runs when it starts. Codex also gets a reminder to check the issue before hand-off or closure. All agents share one tracker
   user, so a run's own comments are told apart by a mark: baton's `lific` wrapper appends `<!-- baton <KEY> run <n> -->`
   (`$BATON_RUN`) to the content of every `comment add` of the run. A comment by the agent of another issue (or an earlier
   run of this one) reaches the run like a person's.
@@ -63,7 +63,7 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   next run is that agent's (a new session in the same worktree).
 - **Herdr mode** (`"herdr": true` in `config.json`): every issue that runs gets a tab in a [Herdr](https://herdr.dev)
   workspace with the detailed live view of its agent (`node watch.mjs <KEY>`): what it says, every tool call and skill,
-  the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue (delivery depends on the agent CLI, as above).
+  the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue.
 - **Land queue** (a project's `land`): an agent does not merge its own branch. It pushes it, names it in the issue's
   `branch` property and hands the issue over: `in_review` with the label `land` (`landLabel`). baton merges every ready
   branch of the project in one batch, runs the landing gate once on the whole batch and pushes it; a red batch is
@@ -217,6 +217,12 @@ Claude workers use `agent.cmd` and Claude's session and hook flags. Codex worker
 in the issue worktree. Baton records the thread ID emitted by Codex and passes it to `exec resume` on the next run.
 A hand-off, a provider switch or a fresh start opens a new session. Both CLIs write to `state/logs/<KEY>.log`;
 `node watch.mjs <KEY>` and the tracker show their messages, tool calls and failures.
+
+For live comments, after baton starts, run `state/bin/review-codex-hooks` as the worker's OS user with the same
+`CODEX_HOME` (use your `stateDir` if customized). Open `/hooks`, trust the two `baton-inbox.cjs codex` handlers
+for `PostToolUse` and `Stop`, then exit. The launcher supplies the same hook definitions as new and resumed
+workers. Codex remembers that choice across issue worktrees and asks again if the definitions change.
+Until trusted, workers still read the issue at startup and are prompted to check it before hand-off.
 
 `agent.codexCmd` can override the Codex worker command prefix (default `["codex", "exec", "--approve-for-me"]`).
 Use a Codex CLI that supports the flags above and a worker permission policy that allows the project's Git operations

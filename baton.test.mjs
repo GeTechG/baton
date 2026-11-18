@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxSettings, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -57,15 +57,17 @@ test('provider selection keeps legacy profiles, picks the matching model and all
   assert.throws(() => profile({}, 'other'), /unknown agent provider/);
 });
 
+const hooks = inboxSettings("/tmp/a worker's hooks/inbox.cjs");
+
 test('worker commands isolate provider flags and resume the specific thread', () => {
   const a = { provider: 'codex', model: 'example' }, prompt = '-task with spaces';
-  assert.deepEqual(runCommand(a, null, true, 'hooks', prompt),
-    ['codex', 'exec', '--approve-for-me', '--json', '--model', 'example', '--', prompt]);
-  assert.deepEqual(runCommand({ provider: 'codex' }, 'thread', false, 'hooks', prompt, { codexCmd: ['custom', 'exec'] }),
-    ['custom', 'exec', '--json', 'resume', 'thread', '--', prompt]);
+  assert.deepEqual(runCommand(a, null, true, hooks, prompt),
+    ['codex', 'exec', '--approve-for-me', '--json', ...hooks.codex, '--model', 'example', '--', prompt]);
+  assert.deepEqual(runCommand({ provider: 'codex' }, 'thread', false, hooks, prompt, { codexCmd: ['custom', 'exec'] }),
+    ['custom', 'exec', '--json', ...hooks.codex, 'resume', 'thread', '--', prompt]);
   const claude = { provider: 'claude', model: 'opus' }, cfg = { cmd: ['wrapper'] };
-  assert.deepEqual(runCommand(claude, 'uuid', true, 'hooks', prompt, cfg), ['wrapper', '--model', 'opus', '--session-id', 'uuid', '--settings', 'hooks', prompt]);
-  assert.ok(runCommand(claude, 'uuid', false, 'hooks', prompt, cfg).includes('--resume'));
+  assert.deepEqual(runCommand(claude, 'uuid', true, hooks, prompt, cfg), ['wrapper', '--model', 'opus', '--session-id', 'uuid', '--settings', hooks.claude, prompt]);
+  assert.ok(runCommand(claude, 'uuid', false, hooks, prompt, cfg).includes('--resume'));
   assert.ok(codexOneShot('example').includes('--ephemeral'));
   assert.deepEqual(codexOneShot('example').slice(-3), ['--model', 'example', '-']);
   assert.ok(!codexOneShot().includes('--model'));
@@ -75,10 +77,10 @@ test('Codex effort follows the worker on resume and the orchestrator on scheduli
   const a = { provider: 'codex', codexEffort: 'high' };
   const settings = (args) => args.filter((arg, index) => args[index - 1] === '-c' && arg.startsWith('model_reasoning_effort='));
   for (const first of [true, false])
-    assert.deepEqual(settings(runCommand(a, 'thread', first, '', 'prompt')), ['model_reasoning_effort="high"']);
+    assert.deepEqual(settings(runCommand(a, 'thread', first, hooks, 'prompt')), ['model_reasoning_effort="high"']);
   assert.deepEqual(settings(codexOneShot('example', 'medium')), ['model_reasoning_effort="medium"']);
   assert.deepEqual(settings(codexOneShot('example')), []);
-  assert.deepEqual(settings(runCommand({ ...a, provider: 'claude' }, 'thread', true, '', 'prompt')), []);
+  assert.deepEqual(settings(runCommand({ ...a, provider: 'claude' }, 'thread', true, hooks, 'prompt')), []);
 });
 
 test('Codex gets its thread only from the startup event, including after a baton restart', () => {
@@ -443,17 +445,31 @@ test('agents\' lific wrapper: runs the tracker CLI on the HTTP backend with the 
   assert.deepEqual(JSON.parse(r.stdout), ['--backend', 'http', 'comment', 'add', 'OS-1', '--content=it\'s "done"\n\n<!-- baton OS-1 run 2 -->']);
 });
 
-test('inbox hook: hands the inbox to the main agent once (exit 2, stderr), leaves it to no sub-agent', async () => {
-  const { mkdtempSync, writeFileSync, existsSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { spawnSync } = await import('node:child_process');
-  const dir = mkdtempSync(`${tmpdir()}/baton-inbox-`), hook = `${dir}/hook.cjs`, inbox = `${dir}/OS-1`;
-  writeFileSync(hook, inboxHook(process.execPath));
-  const fire = (input) => spawnSync(process.execPath, [hook], { input: JSON.stringify(input), env: { BATON_INBOX: inbox }, encoding: 'utf8' });
-  assert.equal(fire({ hook_event_name: 'Stop' }).status, 0); // nothing queued: the turn may end
-  writeFileSync(inbox, 'New comment on OS-1\nsergey: use Y\n');
-  assert.equal(fire({ hook_event_name: 'PostToolUse', agent_id: 'a1' }).status, 0);
-  const r = fire({ hook_event_name: 'PostToolUse' });
-  assert.equal(r.status, 2); assert.equal(r.stderr, 'New comment on OS-1\nsergey: use Y\n'); assert.equal(existsSync(inbox), false);
-  assert.equal(fire({ hook_event_name: 'Stop' }).status, 0);
+test('inbox hooks deliver each comment once to the main worker in the format its CLI expects', async (t) => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { spawnSync } = await import('node:child_process');
+  const dir = mkdtempSync(`${tmpdir()}/baton-inbox-`), path = `${dir}/worker's inbox.cjs`, inbox = `${dir}/OS-1`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path, inboxHook(process.execPath), { mode: 0o755 });
+  const settings = inboxSettings(path), message = 'New comment on OS-1\nuser: use "Y"\n';
+  for (const event of ['PostToolUse', 'Stop']) {
+    const command = JSON.parse(settings.claude).hooks[event][0].hooks[0].command;
+    assert.ok(settings.codex.includes(`hooks.${event}=[{hooks=[{type="command",command=${JSON.stringify(command + ' codex')}}]}]`));
+    for (const provider of ['claude', 'codex']) {
+      const fire = (extra) => spawnSync('sh', ['-c', provider === 'codex' ? command + ' codex' : command], {
+        input: JSON.stringify({ hook_event_name: event, ...extra }), env: { BATON_INBOX: inbox }, encoding: 'utf8' });
+      writeFileSync(inbox, message);
+      assert.equal(fire({ agent_id: 'subagent' }).status, 0);
+      const r = fire();
+      if (provider === 'claude') { assert.equal(r.status, 2); assert.equal(r.stderr, message); }
+      else {
+        assert.equal(r.status, 0);
+        assert.deepEqual(JSON.parse(r.stdout), event === 'Stop' ? { decision: 'block', reason: message }
+          : { hookSpecificOutput: { hookEventName: event, additionalContext: message } });
+      }
+      const empty = fire();
+      assert.equal(empty.status, 0); assert.equal(empty.stdout + empty.stderr, '');
+    }
+  }
 });
 
 test('wave order: manual board order first, issue number on ties', () => {

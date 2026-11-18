@@ -93,11 +93,11 @@ Label names and the wave size are configurable in baton's `config.json`; the nam
 
 ## Talking to an agent at work
 
-Comment on its issue (`lific comment add <KEY> --content=...`). A comment by anyone but the run itself (a person,
-or the agent of another issue) reaches a running Claude Code agent after its current tool call, as a message headed `New comment on <KEY> while you work`;
-a comment made between runs is read at the start of the next one. Codex workers read comments with
-`lific comment list <KEY>` at startup and again before handing off or closing the issue. If you are that agent: such a comment comes from a
-person or another agent about your task, so act on it now, before you go on. Your own comments get a hidden
+Comment on the issue with `lific comment add <KEY> --content=...`. Baton queues new comments for the running
+worker. In Claude Code and in Codex with baton's hooks trusted, the main agent sees the comment after a tool call
+or when it tries to finish its turn. If you see `New comment on <KEY> while you work`, read it before continuing.
+Read comments made between runs at the start of the next run. Codex workers should also check
+`lific comment list <KEY>` before handing off or closing the issue. Your own comments get a hidden
 `<!-- baton <KEY> run <n> -->` line from the `lific` wrapper; leave it be, you need not add it yourself.
 
 ## Working with it
