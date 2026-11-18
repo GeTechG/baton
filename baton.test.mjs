@@ -47,6 +47,22 @@ test('usage limit: a run it cut off says when it resets; a run that only came cl
   assert.equal(limitedUntil('', now), null);
 });
 
+test('Codex events reach the tracker and both watch views, including failed commands and quota errors', async () => {
+  const { say, detail } = await import('./watch.mjs');
+  const item = (type, data) => JSON.stringify({ type, item: data });
+  const cmd = { type: 'command_execution', command: 'npm test' };
+  const start = item('item.started', cmd), end = item('item.completed', { ...cmd, aggregated_output: 'bad test', exit_code: 1 });
+  const answer = item('item.completed', { type: 'agent_message', text: 'all\ndone' });
+  assert.deepEqual(tail(Buffer.from([start, end, answer, ''].join('\n')), 0).out, ['Shell npm test', '✖ bad test', 'all done']);
+  assert.deepEqual(say(item('item.completed', { ...cmd, exit_code: 0 })), []);
+  assert.ok(detail(answer).some((s) => s.includes('done')));
+  assert.ok(detail(end).some((s) => s.includes('bad test')));
+  const fail = JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit" } });
+  assert.equal(say(fail)[0].kind, 'error');
+  assert.equal(limitedUntil(fail, 0), 900000);
+  assert.equal(limitedUntil(answer, 0), null);
+});
+
 test('agent env: AGENT_X becomes X and overrides, baton-only values stay out of reach of the rename', () => {
   assert.deepEqual(agentEnv({ HOME: '/h', LIFIC_API_KEY: 'baton', AGENT_LIFIC_API_KEY: 'bot', AGENT_GH_TOKEN: 't' }, { LIFIC_URL: 'u' }),
     { HOME: '/h', LIFIC_API_KEY: 'bot', GH_TOKEN: 't', LIFIC_URL: 'u' });

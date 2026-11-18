@@ -12,12 +12,33 @@ const c = (n, s) => (process.stdout.isTTY ? `\x1b[${n}m${s}\x1b[0m` : s);
 const one = (s, n = 160) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 const text = (x) => (Array.isArray(x) ? x.map((b) => b.text ?? '').join(' ') : x);
 
+// Translate Codex items into the content blocks both log views already render.
+function blocks(ev) {
+  if (Array.isArray(ev?.message?.content)) return ev.message.content;
+  const i = ev?.item, started = ev?.type === 'item.started', done = ev?.type === 'item.completed';
+  const result = (content, is_error) => [{ type: 'tool_result', content, is_error }];
+  if (ev?.type === 'turn.failed' || ev?.type === 'error') return result(ev.error?.message ?? ev.message, true);
+  if (!i || !(started || done)) return [];
+  const tool = (name, input) => [{ type: 'tool_use', name, input }];
+  switch (i.type) {
+    case 'agent_message': return done ? [{ type: 'text', text: i.text }] : [];
+    case 'reasoning': return done ? [{ type: 'thinking', thinking: i.text }] : [];
+    case 'command_execution': return started ? tool('Shell', { command: i.command })
+      : result(i.aggregated_output || `exit ${i.exit_code}`, i.status === 'failed' || Number(i.exit_code) > 0);
+    case 'mcp_tool_call': return started ? tool(`${i.server}/${i.tool}`, i.arguments ?? {})
+      : result(i.error?.message ?? text(i.result?.content), i.status === 'failed');
+    case 'file_change': return done ? tool('Patch', { description: (i.changes ?? []).map((f) => `${f.kind} ${f.path}`).join(', ') }) : [];
+    case 'web_search': return done ? tool('Search', { description: i.query }) : [];
+    case 'error': return result(i.message, true);
+    default: return [];
+  }
+}
+
 // One line of an agent log (a stream-json event, or anything else printed raw) -> what is worth showing of it:
 // [{ kind: 'tool' | 'error' | 'text', tool?, text }] — a tool call, a failed tool result, something the agent said.
 export function say(raw) {
   let ev; try { ev = JSON.parse(raw); } catch { return one(raw) ? [{ kind: 'text', text: one(raw, 300) }] : []; }
-  const content = ev.message?.content; // a string (what was typed to an interactive agent) is not shown
-  return (Array.isArray(content) ? content : []).flatMap((b) => {
+  return blocks(ev).flatMap((b) => {
     const i = b.input ?? {};
     if (b.type === 'tool_use') return [{ kind: 'tool', tool: b.name ?? 'tool', text: one(i.description ?? i.command ?? i.file_path ?? i.pattern ?? i.prompt ?? JSON.stringify(i)) }];
     if (b.type === 'tool_result') return b.is_error ? [{ kind: 'error', text: one(text(b.content), 140) }] : [];
@@ -36,11 +57,13 @@ const head = (s, n) => { const l = String(s ?? '').trimEnd().split('\n'); return
 const arg = (name, i) => (name === 'Skill' ? i.skill : i.command ?? i.file_path ?? i.pattern ?? i.description ?? i.prompt ?? i.query ?? i.url ?? JSON.stringify(i));
 export function detail(raw, c = (n, s) => s) {
   let ev; try { ev = JSON.parse(raw); } catch { return raw.trim() ? [raw] : []; }
-  if (ev.type === 'system') return ev.subtype === 'init' ? ['', c(2, `◆ session ${ev.session_id} · ${ev.model}`)] : [];
-  if (ev.type === 'result') return ['', c(ev.is_error ? 31 : 32, `◆ ${ev.subtype}: ${ev.num_turns} turns, ${Math.round(ev.duration_ms / 60000)} min, $${ev.total_cost_usd?.toFixed(2)}`)];
-  const content = ev.message?.content, sub = ev.parent_tool_use_id ? '  ' : ''; // a subagent's lines are indented
-  return (Array.isArray(content) ? content : []).flatMap((b) => {
-    if (b.type === 'text' && ev.type !== 'assistant') return head(b.text.trim(), 2).map((l) => c(2, `${sub}  ${l}`)); // text given to the agent (a loaded skill): its head
+  if (ev?.type === 'thread.started') return ['', c(2, `◆ session ${ev.thread_id}`)];
+  if (ev?.type === 'turn.completed') return ['', c(32, '◆ turn completed')];
+  if (ev?.type === 'system') return ev.subtype === 'init' ? ['', c(2, `◆ session ${ev.session_id} · ${ev.model}`)] : [];
+  if (ev?.type === 'result') return ['', c(ev.is_error ? 31 : 32, `◆ ${ev.subtype}: ${ev.num_turns} turns, ${Math.round(ev.duration_ms / 60000)} min, $${ev.total_cost_usd?.toFixed(2)}`)];
+  const sub = ev?.parent_tool_use_id ? '  ' : ''; // a subagent's lines are indented
+  return blocks(ev).flatMap((b) => {
+    if (b.type === 'text' && ev.type !== 'assistant' && ev.type !== 'item.completed') return head(b.text.trim(), 2).map((l) => c(2, `${sub}  ${l}`)); // text given to the agent (a loaded skill): its head
     if (b.type === 'text' && b.text?.trim()) return ['', ...b.text.trim().split('\n').map((l, n) => `${sub}${n ? '  ' : `${c(1, '●')} `}${l}`)];
     if (b.type === 'thinking' && b.thinking?.trim()) return [c(2, `${sub}∴ ${one(b.thinking, 300)}`)];
     if (b.type === 'tool_use') return ['', ...head(arg(b.name, b.input ?? {}), 6).map((l, n, all) => `${sub}${n ? '    ' : `${c(33, '●')} ${c(1, b.name)}(`}${l}${n === all.length - 1 ? ')' : ''}`)];

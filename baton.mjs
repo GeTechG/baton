@@ -93,6 +93,7 @@ export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why
 // that carries the reset (s); without that event, 15 minutes.
 export function limitedUntil(text, now) {
   const es = text.split('\n').map((l) => try_(() => JSON.parse(l))).filter(Boolean);
+  if (es.some((e) => e.type === 'turn.failed' && /you(?:'|’)ve hit your usage limit|usage_limit_reached/i.test(e.error?.message))) return now + 15 * 60_000;
   if (!es.some((e) => e.type === 'result' && e.api_error === 'usage_limit_reached')) return null;
   const at = es.filter((e) => e.type === 'rate_limit_event' && e.rate_limit_info?.status === 'rejected').map((e) => e.rate_limit_info.resetsAt * 1000);
   return at.length ? Math.max(...at) : now + 15 * 60_000;

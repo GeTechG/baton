@@ -43,7 +43,7 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   move: baton starts it again whenever its process has ended, parks it back to `todo` (it is offered again in the next
   wave) while it waits on a blocker or a human, and after `maxRuns` (default 3) runs of one agent in a row with nothing
   to show adds `needs-human` instead of burning tokens. A run the account's usage limit cut off (Claude Code's
-  `usage_limit_reached`) does not count; no agent and no wave starts until the limit resets (`bridge.log`:
+  `usage_limit_reached` or a Codex turn that reports its usage limit) does not count; no agent and no wave starts until the reported reset, or for 15 minutes when no reset time is available (`bridge.log`:
   `limit <KEY> run not counted, agents wait until <time>`, UTC like the rest of the log). When the issue closes, baton removes its worktree and first stops
   every process still running in it (cwd inside the worktree or a path into it on the command line: the agent's
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
