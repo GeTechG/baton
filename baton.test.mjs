@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, byBoard, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -45,6 +45,49 @@ test('usage limit: a run it cut off says when it resets; a run that only came cl
   assert.equal(limitedUntil(j({ type: 'result', is_error: true, api_error: 'overloaded' }), now), null);
   assert.equal(limitedUntil('{"type":"result","api_error":"usage_li', now), null); // a line still being written
   assert.equal(limitedUntil('', now), null);
+});
+
+test('provider selection keeps legacy profiles, picks the matching model and allows a per-agent override', () => {
+  assert.deepEqual(profile({ model: 'opus' }), { provider: 'claude', model: 'opus' });
+  assert.deepEqual(profile({ model: { claude: 'opus' } }, 'codex'), { provider: 'codex', model: undefined });
+  assert.equal(profile({ provider: 'codex', model: { codex: 'example' } }, 'claude').model, 'example');
+  assert.ok(sameAgent({ agent: 'worker' }, { name: 'worker', provider: 'claude' }));
+  assert.ok(!sameAgent({ agent: 'worker' }, { name: 'worker', provider: 'codex' }));
+  assert.ok(!sameAgent({ agent: 'old', provider: 'codex' }, { name: 'worker', provider: 'codex' }));
+  assert.throws(() => profile({}, 'other'), /unknown agent provider/);
+});
+
+test('worker commands isolate provider flags and resume the specific thread', () => {
+  const a = { provider: 'codex', model: 'example' }, prompt = '-task with spaces';
+  assert.deepEqual(runCommand(a, null, true, 'hooks', prompt),
+    ['codex', 'exec', '--approve-for-me', '--json', '--model', 'example', '--', prompt]);
+  assert.deepEqual(runCommand({ provider: 'codex' }, 'thread', false, 'hooks', prompt, { codexCmd: ['custom', 'exec'] }),
+    ['custom', 'exec', '--json', 'resume', 'thread', '--', prompt]);
+  const claude = { provider: 'claude', model: 'opus' }, cfg = { cmd: ['wrapper'] };
+  assert.deepEqual(runCommand(claude, 'uuid', true, 'hooks', prompt, cfg), ['wrapper', '--model', 'opus', '--session-id', 'uuid', '--settings', 'hooks', prompt]);
+  assert.ok(runCommand(claude, 'uuid', false, 'hooks', prompt, cfg).includes('--resume'));
+  assert.ok(codexOneShot('example').includes('--ephemeral'));
+  assert.deepEqual(codexOneShot('example').slice(-3), ['--model', 'example', '-']);
+  assert.ok(!codexOneShot().includes('--model'));
+});
+
+test('Codex effort follows the worker on resume and the orchestrator on scheduling calls', () => {
+  const a = { provider: 'codex', codexEffort: 'high' };
+  const settings = (args) => args.filter((arg, index) => args[index - 1] === '-c' && arg.startsWith('model_reasoning_effort='));
+  for (const first of [true, false])
+    assert.deepEqual(settings(runCommand(a, 'thread', first, '', 'prompt')), ['model_reasoning_effort="high"']);
+  assert.deepEqual(settings(codexOneShot('example', 'medium')), ['model_reasoning_effort="medium"']);
+  assert.deepEqual(settings(codexOneShot('example')), []);
+  assert.deepEqual(settings(runCommand({ ...a, provider: 'claude' }, 'thread', true, '', 'prompt')), []);
+});
+
+test('Codex gets its thread only from the startup event, including after a baton restart', () => {
+  const id = '0199a213-81c0-7800-8aa1-bbab2a035a53';
+  const event = (type, thread_id) => JSON.stringify({ type, thread_id });
+  assert.equal(codexThread(['warning', event('thread.started', id), '{"type":'].join('\n')), id);
+  assert.equal(codexThread(event('item.completed', id)), null);
+  assert.equal(codexThread(event('thread.started', '--last')), null);
+  assert.equal(codexThread(''), null);
 });
 
 test('Codex events reach the tracker and both watch views, including failed commands and quota errors', async () => {

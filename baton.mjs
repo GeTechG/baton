@@ -13,15 +13,15 @@
 // `issue get` per open issue per tick, a run is "alive" while its pid exists (a reboot can recycle it), a worktree's
 // processes are found in /proc (Linux only),
 // one `comment list` per running and per refused issue per tick, a comment reaches a running agent only after its current tool call,
-// agents and the orchestrator run on the claude CLI only.
+// live comment delivery uses Claude Code hooks.
 // cfg.herdr: every issue that runs also gets a Herdr tab showing its live log (`node watch.mjs <KEY>`).
 // cfg.projects.*.land: the merge queue; agents hand over finished branches, baton merges the ready ones in a batch, gates the
 // batch once and pushes it, or bisects it and sends the branch that turns it red back to its agent.
 // cfg.projects.*.milestone: once a project's queue is empty, the gate of its merged tree runs; a red stage is bisected and filed as todo.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { plain, say } from './watch.mjs';
@@ -31,7 +31,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const CFG_FILE = process.env.BATON_CONFIG ?? resolve(ROOT, 'config.json');
 const CFG = existsSync(CFG_FILE) ? JSON.parse(readFileSync(CFG_FILE, 'utf8')) : {}; // tests import pure fns without an instance
 CFG.projects ??= {}; CFG.humanLabel ??= 'needs-human'; CFG.freshLabel ??= 'fresh'; CFG.landLabel ??= 'land'; CFG.maxWave ??= 5; CFG.maxRuns ??= 3; CFG.tickSec ??= 5; CFG.waveRetrySec ??= [60, 300, 900];
-CFG.agent ??= {}; CFG.agent.user ??= 'agent'; CFG.agent.cmd ??= ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto'];
+CFG.agent ??= {}; CFG.agent.user ??= 'agent';
 const DIR = resolve(ROOT, CFG.stateDir ?? 'state'), CLOSED = ['done', 'cancelled'];
 if (CFG.lific) CFG.lific.bin = resolve(ROOT, CFG.lific.bin);
 
@@ -107,6 +107,30 @@ export const agentPath = (bin, wt, path) => `${bin}:${wt}/node_modules/.bin:${pa
 // Who runs the issue next: the agent its `agent` property names, else the one that ran it last, else the base worker
 // (an issue a human set `active` by hand).
 export const holder = (i, r, dflt = 'worker') => i.agent ?? r?.agent ?? dflt;
+// Bundled profiles carry provider-specific model defaults. A local profile may name its model directly.
+export function profile(a, fallback = 'claude') {
+  const provider = a.provider ?? fallback;
+  if (!['claude', 'codex'].includes(provider)) throw new Error(`unknown agent provider "${provider}"`);
+  return { ...a, provider, model: typeof a.model === 'string' ? a.model : a.model?.[provider] };
+}
+// Existing runs from before provider selection belong to Claude Code.
+export const sameAgent = (r, a) => !!a && r?.agent === a.name && (r.provider ?? 'claude') === a.provider;
+const codexReasoning = (effort) => effort ? ['-c', `model_reasoning_effort=${JSON.stringify(effort)}`] : [];
+export function runCommand(a, session, first, hooks, prompt, cfg = {}) {
+  const model = a.model ? ['--model', a.model] : [];
+  if (a.provider === 'codex') return [...(cfg.codexCmd ?? ['codex', 'exec', '--approve-for-me']), '--json', ...model, ...codexReasoning(a.codexEffort),
+    ...(first ? [] : ['resume', session]), '--', prompt];
+  return [...(cfg.cmd ?? ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto']),
+    ...model, first ? '--session-id' : '--resume', session, '--settings', hooks, prompt];
+}
+// Codex assigns the thread id. Only the current run's own startup event may select the next session.
+export function codexThread(log) {
+  for (const line of log.split('\n')) {
+    const e = try_(() => JSON.parse(line));
+    if (e?.type === 'thread.started' && typeof e.thread_id === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(e.thread_id)) return e.thread_id;
+  }
+  return null;
+}
 // The config's projects that baton's own tracker identity does not see (listed = `project list` names). Lific hides such
 // a project, and drops its issues from every `blocked_by` too, so a blocker there does not hold anything.
 export const unseen = (cfgProjects, listed) => Object.keys(cfgProjects).filter((n) => !listed.includes(n));
@@ -328,7 +352,7 @@ const alive = (r) => !!r?.pid && try_(() => process.kill(r.pid, 0)) === true;
 function loadAgents() {
   const dirs = [resolve(ROOT, 'agents'), resolve(ROOT, CFG.agents ?? 'local/agents')].filter(existsSync);
   const all = dirs.flatMap((d) => readdirSync(d).filter((f) => f.endsWith('.json')).sort().map((f) => JSON.parse(readFileSync(`${d}/${f}`, 'utf8'))));
-  return [...new Map(all.map((a) => [a.name, a])).values()];
+  return [...new Map(all.map((a) => [a.name, a])).values()].map((a) => profile(a, CFG.provider));
 }
 
 // The local checkout the issue worktrees hang off: the configured one (p.path), else baton's own clone.
@@ -405,22 +429,27 @@ function watchTab(key, r) {
 }
 function start(p, i, runs, a) {
   // Another agent on the issue = a new session in the same worktree; so is a session that never started.
-  const r = runs[i.identifier] ??= { n: 0 }, handed = r.agent !== a.name, first = handed || !sessionFile(r);
+  const r = runs[i.identifier] ??= { n: 0 }, handed = !sameAgent(r, a);
+  const first = handed || !(a.provider === 'codex' ? r.session : sessionFile(r));
   if (handed) Object.assign(r, { agent: a.name, n: 0 });
-  if (first) r.session = randomUUID();
+  r.provider = a.provider;
+  if (first) r.session = a.provider === 'codex' ? null : randomUUID();
   if (!(r.wt ??= worktree(p, i.identifier))) { delete runs[i.identifier]; i.labels.push(CFG.humanLabel); return; } // parked on the next tick
   const prompt = first ? firstPrompt(a, p, i)
     : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
   // A new run reads every comment on its own; the inbox is for what comes while it runs (listen()).
-  const last = try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new
+  const last = a.provider === 'codex' ? null : try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new
   r.heard = last && Math.max(0, ...last.map((c) => c.id)); rmSync(inbox(i.identifier), { force: true });
-  const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a'), [bin, ...args] = CFG.agent.cmd;
+  const logFile = `${DIR}/logs/${i.identifier}.log`, out = openSync(logFile, 'a');
   r.pos ??= statSync(logFile).size; // an earlier life of this issue (before a fresh restart) is already forwarded
   r.from = statSync(logFile).size; // where this run's part of the log starts (limitedUntil)
-  const child = spawn(bin, [...args, ...(a.model ? ['--model', a.model] : []), first ? '--session-id' : '--resume', r.session, '--settings', HOOKS, prompt], { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
+  const guidance = a.provider === 'codex' ? `\nRead the latest comments with lific comment list ${i.identifier} before handing off or closing the issue.` : '';
+  const [bin, ...args] = runCommand(a, r.session, first, HOOKS, prompt + guidance, CFG.agent);
+  const child = spawn(bin, args, { cwd: r.wt, detached: true, stdio: ['ignore', out, out],
     env: agentEnv(process.env, { LIFIC_URL: CFG.lific.url, PATH: agentPath(`${DIR}/bin`, r.wt, process.env.PATH), BATON_INBOX: inbox(i.identifier),
       BATON_ISSUE: i.identifier, BATON_RUN: runMark(i.identifier, (r.total ?? 0) + 1) }) });
+  closeSync(out);
   child.on('error', (e) => log(null, 'run failed', i.identifier, e.message));
   if (CFG.herdr) try { watchTab(i.identifier, r); } catch (e) { log('herdr', 'herdr tab failed', e.message.split('\n')[0]); }
   child.unref(); r.pid = child.pid; r.n++; r.total = (r.total ?? 0) + 1; // n restarts at every hand-off, review or park; total names the run
@@ -464,11 +493,23 @@ function restartFresh(p, i, runs) {
 // argv of a one-shot model call (footprint, orchestrator): no tools and no MCP servers, so the one turn is the answer.
 // With tools the model may spend it on a look around and `claude -p` exits 1 with "Reached max turns".
 export const oneShot = (model) => ['-p', '--model', model, '--max-turns', '1', '--tools', '', '--strict-mcp-config'];
-function estimateFootprint(p, i) { // bounded, fresh LLM call; persisted on the issue
+export const codexOneShot = (model, effort) => ['exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--ignore-user-config',
+  '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps', '--disable', 'view_image', '--disable', 'goals',
+  '-c', 'web_search="disabled"', ...codexReasoning(effort), ...(model ? ['--model', model] : []), '-'];
+function ask(provider, model, prompt, effort) {
+  const opts = { input: prompt, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] };
+  if (provider === 'claude') return execFileSync('claude', oneShot(model), opts);
+  // Scheduling prompts contain the context they need. Keep checkout instructions and project MCP servers out.
+  const cwd = mkdtempSync(resolve(tmpdir(), 'baton-plan-'));
+  try { return execFileSync('codex', codexOneShot(model, effort), { ...opts, cwd, timeout: 120_000 }); }
+  finally { rmSync(cwd, { recursive: true, force: true }); }
+}
+function estimateFootprint(p, i, o) { // bounded, fresh LLM call; persisted on the issue
   const files = repoMap(gh('api', `repos/${p.repo}/git/trees/${p.base}?recursive=1`, '-q', '.tree[].path').split('\n'));
   const prompt = `Repo paths:\n${files}\n\nTask:\n${i.title}\n${i.description ?? ''}\n\n${p.footprintHint ?? ''}\n` +
     'Reply with ONLY a comma-separated list of repo paths this task will create or edit.';
-  const out = execFileSync('claude', oneShot('haiku'), { input: prompt, encoding: 'utf8' }).trim(); // stdin: argv has a size limit
+  const provider = o?.provider ?? CFG.provider ?? 'claude';
+  const out = ask(provider, provider === 'claude' ? 'haiku' : o?.model, prompt, o?.codexEffort).trim(); // stdin: argv has a size limit
   const fp = list(out);
   t('issue', 'update', i.identifier, `--set=footprint=${fp.join(', ')}`);
   log(null, 'footprint', i.identifier, fp.join(', '));
@@ -503,7 +544,7 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room)
     'because it must wait for another open task, add `<KEY> after <OTHER KEY>: <why>`: OTHER becomes its blocker and it is not ' +
     'offered until OTHER closes. For one only a person can settle (a duplicate, an obsolete or unclear task), add `<KEY> human: <why>`. ' +
     'If you start nothing and add no such line, reply with one line saying why.';
-  return execFileSync('claude', oneShot(o.model || 'sonnet'), { input: prompt, encoding: 'utf8' });
+  return ask(o.provider, o.model || (o.provider === 'claude' ? 'sonnet' : null), prompt, o.codexEffort);
 }
 
 // ---- p.milestone: one job at a time per project, detached under `timeout`: the milestone in a clean worktree at
@@ -701,14 +742,16 @@ function tick() {
   // A run the usage limit cut off is not one of them: it does not count, and no agent or wave starts until the limit
   // resets (it is the account's: every other run would hit it too).
   for (const [key, r] of Object.entries(runs).filter(([, x]) => x.from != null && !alive(x))) {
-    const until = limitedUntil(try_(() => readFileSync(`${DIR}/logs/${key}.log`).subarray(r.from).toString('utf8')) ?? '', Date.now());
+    const output = try_(() => readFileSync(`${DIR}/logs/${key}.log`).subarray(r.from).toString('utf8')) ?? '';
+    if (r.provider === 'codex') r.session = codexThread(output);
+    const until = limitedUntil(output, Date.now());
     if (until) { r.n = Math.max(0, r.n - 1); limit = Math.max(limit, until); log(null, 'limit', key, 'run not counted, agents wait until', new Date(limit).toISOString().slice(11, 16), 'UTC'); }
     delete r.from; saveRuns(runs);
   }
   const limited = Date.now() < limit;
   for (const i of issues.filter((x) => x.status === 'in_progress')) {
     const r = runs[i.identifier], name = holder(i, r), a = agents.find((x) => x.name === name);
-    const why = whyNot(i, [], statusOf) ?? (a ? null : `no agent "${name}"`), step = runStep(alive(r), why, r?.agent === name ? r.n : 0);
+    const why = whyNot(i, [], statusOf) ?? (a ? null : `no agent "${name}"`), step = runStep(alive(r), why, sameAgent(r, a) ? r.n : 0);
     if (step === 'park') {
       if (!a) { comment(i.identifier, `Bridge: this issue names the agent "${name}", which does not exist. Agents: ${agents.map((x) => x.name).join(', ')}.`); relabel(i.identifier, 'add', CFG.humanLabel); }
       t('issue', 'update', i.identifier, '--status=todo'); i.status = 'todo';
@@ -738,7 +781,7 @@ function tick() {
   // comments on it, so the next wave gets the ones behind it at once.
   const same = snapshot(issues) === last.snap, busy = () => issues.some((x) => x.status === 'in_progress');
   let refused = stillRefused(last.refused, same, (k) => JSON.stringify(byKey[k].said ??= said(tj('comment', 'list', k))));
-  const offering = () => offer(free.filter((x) => x.status === 'todo' && !(x.identifier in refused)), (x, taken) => (x.footprint ??= estimateFootprint(projects[x.project_id], x),
+  const offering = () => offer(free.filter((x) => x.status === 'todo' && !(x.identifier in refused)), (x, taken) => (x.footprint ??= estimateFootprint(projects[x.project_id], x, o),
     !whyNot(x, [...held, ...taken], statusOf, projects[x.project_id].sharedPaths, projects[x.project_id].overlap)), (x) => runs[x.identifier])
     .map((x) => (x.said ??= said(tj('comment', 'list', x.identifier)), x));
   let waiting = offering();

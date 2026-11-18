@@ -27,19 +27,18 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   `bridge.log` shows each as `fix`.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
   "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
-  named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (Haiku-estimated if
+  named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (estimated if
   missing) that overlaps an issue of the same project that is `active` or `in_review` (not in a project with `overlap`, below).
 - **Agents:** one JSON file each (`name`, `model`, `description`, `instructions`) in `agents/` — `worker`, a
   project-independent worker that takes the process from the repo's `AGENTS.md`, and `orchestrator` — plus your own in
   `local/agents/` (gitignored; `agents` in `config.json` names another directory; a file with the same `name` replaces
   the base one). The orchestrator (`orchestrator` in `config.json` names another) never gets an issue: baton reads
-  its model and instructions, which are extra guidance for the choice. Files are read every tick: no restart to edit one.
+  its provider, model and instructions, which give extra guidance for the choice. Files are read every tick: no restart to edit one.
 - **Runs:** one git worktree per issue, kept until the issue closes, and one agent session per agent on it, so a
   later run resumes the conversation and reuses the build output. The worktree hangs off the project's local checkout
   (`path`) at `<path>.wt/<KEY>`, detached at `origin/<base>`; the agent makes its own branch. A checkout that is a git submodule works too: when the repo has `extensions.worktreeConfig` on, a
   new worktree would inherit the module's `core.worktree` (git would see every file as deleted), so baton gives it its own (`git config --worktree`), also for the land and milestone worktrees. The agent process starts
-  in that worktree, so everything the repo ships for coding agents (`.claude/skills`, `.claude/settings.json` with its
-  hooks, `.mcp.json`, `CLAUDE.md`) is loaded as in an interactive session there. An `active` issue is the agent's to
+  in that worktree, so the selected CLI loads the repo's instructions and settings according to its usual trust policy. An `active` issue is the agent's to
   move: baton starts it again whenever its process has ended, parks it back to `todo` (it is offered again in the next
   wave) while it waits on a blocker or a human, and after `maxRuns` (default 3) runs of one agent in a row with nothing
   to show adds `needs-human` instead of burning tokens. A run the account's usage limit cut off (Claude Code's
@@ -49,11 +48,11 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
   The local branch the worktree had checked out (it lives in the shared checkout) goes too, once `origin/<base>` contains it;
   an unmerged one stays.
-  **Talking to a running agent:** comment on its issue. baton checks the comments of every running issue each tick;
+  **Talking to a running agent:** comment on its issue. For Claude Code, baton checks comments each tick;
   a new one goes to `state/inbox/<KEY>` unless the run itself wrote it, and a hook baton adds to the run (`--settings`:
   `PostToolUse` and `Stop`, on top of the repo's own hooks) shows it to the agent after its current tool call, or keeps
   it from ending its turn before it has read it (`bridge.log`: `tell <KEY> <n> comment`). A sub-agent's tool calls leave it
-  to the main agent. A comment made while no run is active is read by the next run, as before. All agents share one tracker
+  to the main agent. Codex workers read the tracker comments at startup and are prompted to check again before handing off or closing the issue. A comment made while no run is active is read by the next run, as before. All agents share one tracker
   user, so a run's own comments are told apart by a mark: baton's `lific` wrapper appends `<!-- baton <KEY> run <n> -->`
   (`$BATON_RUN`) to the content of every `comment add` of the run. A comment by the agent of another issue (or an earlier
   run of this one) reaches the run like a person's.
@@ -64,7 +63,7 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   next run is that agent's (a new session in the same worktree).
 - **Herdr mode** (`"herdr": true` in `config.json`): every issue that runs gets a tab in a [Herdr](https://herdr.dev)
   workspace with the detailed live view of its agent (`node watch.mjs <KEY>`): what it says, every tool call and skill,
-  the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue (it sees the comment after its current tool call).
+  the head of every result. The agent itself runs headless as always; to tell it something, comment on the issue (delivery depends on the agent CLI, as above).
 - **Land queue** (a project's `land`): an agent does not merge its own branch. It pushes it, names it in the issue's
   `branch` property and hands the issue over: `in_review` with the label `land` (`landLabel`). baton merges every ready
   branch of the project in one batch, runs the landing gate once on the whole batch and pushes it; a red batch is
@@ -197,9 +196,32 @@ that names no stage (a timeout is exit 124, a failed `setup`) files one issue wi
 one filed is closed. Logs and state: `state/milestones/`, `state/milestones.json`;
 `bridge.log` has a `milestone <KEY> run|red|green|bisect|filed` line for each step.
 
-An agent run is `agent.cmd` in `config.json` (default: Claude Code, headless, stream-json into `state/logs/<KEY>.log`)
-plus `--model <the agent's model>`, `--session-id <uuid>` on the agent's first run on the issue or `--resume <uuid>`
-after that (a session that never started is not resumed), then the prompt: the agent's `instructions`, the issue key, repo and base branch, and the project's `instructions` if set.
+## Choosing Claude Code or Codex
+
+Claude Code is the default. To use Codex for the bundled worker, wave selection and footprint estimates, install the
+Codex CLI, authenticate it as the OS user that runs baton, and add this top-level entry to `config.json`:
+
+```json
+"provider": "codex"
+```
+
+To mix providers, set `"provider": "codex"` or `"provider": "claude"` in an individual agent's JSON file. For example,
+copy `agents/worker.json` to `local/agents/worker.json` and add `"provider": "codex"` to run that worker with Codex.
+The orchestrator's provider handles both wave selection and footprint estimation. Local profiles can specify `model`
+as a model name for the selected provider, or as an object keyed by provider. Check any local profiles with a fixed
+model name when switching providers. Set `codexEffort` in each agent's JSON profile to choose its reasoning effort.
+The bundled Codex worker uses `gpt-6.2-astra` with `high` effort for new and resumed runs.
+The orchestrator uses `gpt-6.2-sol` with `medium` effort for both wave selection and footprint estimates.
+
+Claude workers use `agent.cmd` and Claude's session and hook flags. Codex workers use `codex exec --approve-for-me --json`
+in the issue worktree. Baton records the thread ID emitted by Codex and passes it to `exec resume` on the next run.
+A hand-off, a provider switch or a fresh start opens a new session. Both CLIs write to `state/logs/<KEY>.log`;
+`node watch.mjs <KEY>` and the tracker show their messages, tool calls and failures.
+
+`agent.codexCmd` can override the Codex worker command prefix (default `["codex", "exec", "--approve-for-me"]`).
+Use a Codex CLI that supports the flags above and a worker permission policy that allows the project's Git operations
+and access to the Lific server. For scheduling calls baton uses `codex` from PATH in a temporary directory with
+`--ephemeral --sandbox read-only --ignore-user-config`. It sends the prompt on stdin and reads the final answer on stdout.
 Nothing project-specific lives in this repo: `config.json`, `.env` and `local/` are gitignored.
 
 ## Agent skill
