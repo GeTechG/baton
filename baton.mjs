@@ -87,12 +87,22 @@ export function tail(buf, pos) {
 // An in_progress issue: null = its agent is still running | 'park' it (waits on a blocker or a human) | 'start' the
 // next run | 'stuck' = max runs of one agent in a row ended with nothing to show, so a human has to look.
 export const runStep = (alive, why, n, max = CFG.maxRuns) => (alive ? null : why ? 'park' : n >= max ? 'stuck' : 'start');
+// Codex prints local time, with an English month and ordinal day only for a reset on a different date.
+function codexReset(message, now) {
+  const m = /try again at (?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2})(?:st|nd|rd|th), (\d{4}) )?(1[0-2]|[1-9]):([0-5]\d) (AM|PM)\.?$/i.exec(message.trim());
+  if (!m) return null;
+  const date = new Date(now);
+  if (m[1]) date.setFullYear(Number(m[3]), 'jan feb mar apr may jun jul aug sep oct nov dec'.split(' ').indexOf(m[1].toLowerCase()), Number(m[2]));
+  date.setHours(Number(m[4]) % 12 + (m[6].toUpperCase() === 'PM' ? 12 : 0), Number(m[5]), 0, 0);
+  return date.getTime() > now ? date.getTime() : null;
+}
 // The part of an agent log one run wrote -> when the account's usage limit it ran into resets (ms), or null if it did
 // not run into one. Claude Code ends such a run with a result `usage_limit_reached`, after a rejected rate_limit_event
 // that carries the reset (s); without that event, 15 minutes.
-export function limitedUntil(text, now) {
+export function limitedUntil(text, now, sameTimezone = true) {
   const es = text.split('\n').map((l) => try_(() => JSON.parse(l))).filter(Boolean);
-  if (es.some((e) => e.type === 'turn.failed' && /you(?:'|’)ve hit your usage limit|usage_limit_reached/i.test(e.error?.message))) return now + 15 * 60_000;
+  const quota = es.find((e) => e.type === 'turn.failed' && /you['’]ve hit your usage limit|usage_limit_reached|your workspace is out of credits|you hit your spend cap set (?:in|by the owner of) your workspace/i.test(e.error?.message));
+  if (quota) return (sameTimezone ? codexReset(quota.error.message, now) : null) ?? now + 15 * 60_000;
   if (!es.some((e) => e.type === 'result' && e.api_error === 'usage_limit_reached')) return null;
   const at = es.filter((e) => e.type === 'rate_limit_event' && e.rate_limit_info?.status === 'rejected').map((e) => e.rate_limit_info.resetsAt * 1000);
   return at.length ? Math.max(...at) : now + 15 * 60_000;
@@ -132,12 +142,14 @@ export function runCommand(a, session, first, hooks, prompt, cfg = {}) {
     ...model, first ? '--session-id' : '--resume', session, '--settings', hooks.claude, prompt];
 }
 // Codex assigns the thread id. Only the current run's own startup event may select the next session.
-export function codexThread(log) {
+export function codexThread(log, previous = null) {
   for (const line of log.split('\n')) {
+    if (line.startsWith('Error: thread/resume:') && line.includes(`no rollout found for thread id ${previous} `)) return null;
     const e = try_(() => JSON.parse(line));
     if (e?.type === 'thread.started' && typeof e.thread_id === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(e.thread_id)) return e.thread_id;
   }
-  return null;
+  // A transient startup error leaves the saved thread usable. A deleted rollout needs a fresh start.
+  return previous;
 }
 // The config's projects that baton's own tracker identity does not see (listed = `project list` names). Lific hides such
 // a project, and drops its issues from every `blocked_by` too, so a blocker there does not hold anything.
@@ -756,8 +768,8 @@ function tick() {
   // resets (it is the account's: every other run would hit it too).
   for (const [key, r] of Object.entries(runs).filter(([, x]) => x.from != null && !alive(x))) {
     const output = try_(() => readFileSync(`${DIR}/logs/${key}.log`).subarray(r.from).toString('utf8')) ?? '';
-    if (r.provider === 'codex') r.session = codexThread(output);
-    const until = limitedUntil(output, Date.now());
+    if (r.provider === 'codex') r.session = codexThread(output, r.session);
+    const until = limitedUntil(output, Date.now(), !process.env.AGENT_TZ || process.env.AGENT_TZ === process.env.TZ);
     if (until) { r.n = Math.max(0, r.n - 1); limit = Math.max(limit, until); log(null, 'limit', key, 'run not counted, agents wait until', new Date(limit).toISOString().slice(11, 16), 'UTC'); }
     delete r.from; saveRuns(runs);
   }

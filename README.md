@@ -42,7 +42,7 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   move: baton starts it again whenever its process has ended, parks it back to `todo` (it is offered again in the next
   wave) while it waits on a blocker or a human, and after `maxRuns` (default 3) runs of one agent in a row with nothing
   to show adds `needs-human` instead of burning tokens. A run the account's usage limit cut off (Claude Code's
-  `usage_limit_reached` or a Codex turn that reports its usage limit) does not count; no agent and no wave starts until the reported reset, or for 15 minutes when no reset time is available (`bridge.log`:
+  `usage_limit_reached` or a Codex turn that reports its usage limit) does not count; no agent and no wave starts until the reported reset, or for 15 minutes when no usable reset time is available (including a Codex worker with a separate `AGENT_TZ` setting) (`bridge.log`:
   `limit <KEY> run not counted, agents wait until <time>`, UTC like the rest of the log). When the issue closes, baton removes its worktree and first stops
   every process still running in it (cwd inside the worktree or a path into it on the command line: the agent's
   background commands, dev servers): SIGTERM, SIGKILL 3 s later; `bridge.log` says `cleanup <KEY> killed <n>`.
@@ -215,8 +215,8 @@ The orchestrator uses `gpt-6.2-sol` with `medium` effort for both wave selection
 
 Claude workers use `agent.cmd` and Claude's session and hook flags. Codex workers use `codex exec --approve-for-me --json`
 in the issue worktree. Baton records the thread ID emitted by Codex and passes it to `exec resume` on the next run.
-A hand-off, a provider switch or a fresh start opens a new session. Both CLIs write to `state/logs/<KEY>.log`;
-`node watch.mjs <KEY>` and the tracker show their messages, tool calls and failures.
+A transient startup failure keeps the saved thread ID for the next attempt. A missing thread, hand-off, provider switch or fresh start opens a new session. Both CLIs write to `state/logs/<KEY>.log`;
+`node watch.mjs <KEY>` and the tracker show their messages, tool calls (including Codex subagent calls), declined commands and failed patches.
 
 For live comments, after baton starts, run `state/bin/review-codex-hooks` as the worker's OS user with the same
 `CODEX_HOME` (use your `stateDir` if customized). Open `/hooks`, trust the two `baton-inbox.cjs codex` handlers

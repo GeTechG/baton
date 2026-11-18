@@ -47,6 +47,17 @@ test('usage limit: a run it cut off says when it resets; a run that only came cl
   assert.equal(limitedUntil('', now), null);
 });
 
+test('Codex quota waits for the reported local reset or falls back to 15 minutes', () => {
+  const now = new Date(2026, 10, 20, 9, 0).getTime(), later = now + 15 * 60_000;
+  const hit = (suffix) => JSON.stringify({ type: 'turn.failed', error: { message: `You’ve hit your usage limit. ${suffix}` } });
+  assert.equal(limitedUntil(hit('Try again at 12:02 PM.'), now), new Date(2026, 10, 20, 12, 2).getTime());
+  assert.equal(limitedUntil(hit('Try again at Nov 21st, 2026 12:02 AM.'), now), new Date(2026, 10, 21, 0, 2).getTime());
+  assert.equal(limitedUntil(hit('Try again later.'), now), later);
+  assert.equal(limitedUntil(JSON.stringify({ type: 'turn.failed', error: { message: 'Your workspace is out of credits. Add credits to continue.' } }), now), later);
+  assert.equal(limitedUntil(hit('Try again at 1:11 AM.'), now), later);
+  assert.equal(limitedUntil(hit('Try again at 11:00 AM.'), now, false), later);
+});
+
 test('provider selection keeps legacy profiles, picks the matching model and allows a per-agent override', () => {
   assert.deepEqual(profile({ model: 'opus' }), { provider: 'claude', model: 'opus' });
   assert.deepEqual(profile({ model: { claude: 'opus' } }, 'codex'), { provider: 'codex', model: undefined });
@@ -90,6 +101,8 @@ test('Codex gets its thread only from the startup event, including after a baton
   assert.equal(codexThread(event('item.completed', id)), null);
   assert.equal(codexThread(event('thread.started', '--last')), null);
   assert.equal(codexThread(''), null);
+  assert.equal(codexThread('startup failed', id), id);
+  assert.equal(codexThread(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${id} (code -32600)`, id), null);
 });
 
 test('Codex events reach the tracker and both watch views, including failed commands and quota errors', async () => {
@@ -102,6 +115,12 @@ test('Codex events reach the tracker and both watch views, including failed comm
   assert.deepEqual(say(item('item.completed', { ...cmd, exit_code: 0 })), []);
   assert.ok(detail(answer).some((s) => s.includes('done')));
   assert.ok(detail(end).some((s) => s.includes('bad test')));
+  assert.equal(say(item('item.completed', { ...cmd, status: 'declined', exit_code: null }))[0].text, 'declined');
+  assert.deepEqual(say(item('item.completed', { type: 'file_change', status: 'failed', changes: [{ kind: 'update', path: 'a' }] })),
+    [{ kind: 'error', text: 'Patch failed: update a' }]);
+  const collab = { type: 'collab_tool_call', tool: 'spawn_agent', prompt: 'check foo' };
+  assert.deepEqual(say(item('item.started', collab)), [{ kind: 'tool', tool: 'spawn_agent', text: 'check foo' }]);
+  assert.equal(say(item('item.completed', { ...collab, status: 'failed' }))[0].kind, 'error');
   const fail = JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit" } });
   assert.equal(say(fail)[0].kind, 'error');
   assert.equal(limitedUntil(fail, 0), 900000);

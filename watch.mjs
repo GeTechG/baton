@@ -24,10 +24,16 @@ function blocks(ev) {
     case 'agent_message': return done ? [{ type: 'text', text: i.text }] : [];
     case 'reasoning': return done ? [{ type: 'thinking', thinking: i.text }] : [];
     case 'command_execution': return started ? tool('Shell', { command: i.command })
-      : result(i.aggregated_output || `exit ${i.exit_code}`, i.status === 'failed' || Number(i.exit_code) > 0);
+      : result(i.aggregated_output || (i.exit_code != null ? `exit ${i.exit_code}` : i.status),
+        i.status === 'failed' || i.status === 'declined' || (i.exit_code != null && i.exit_code !== 0));
     case 'mcp_tool_call': return started ? tool(`${i.server}/${i.tool}`, i.arguments ?? {})
       : result(i.error?.message ?? text(i.result?.content), i.status === 'failed');
-    case 'file_change': return done ? tool('Patch', { description: (i.changes ?? []).map((f) => `${f.kind} ${f.path}`).join(', ') }) : [];
+    case 'file_change': {
+      const files = (i.changes ?? []).map((f) => `${f.kind} ${f.path}`).join(', ');
+      return !done ? [] : i.status === 'failed' ? result(`Patch failed: ${files}`, true) : tool('Patch', { description: files });
+    }
+    case 'collab_tool_call': return started ? tool(i.tool, { description: i.prompt || (i.receiver_thread_ids ?? []).join(', ') })
+      : result(`${i.tool}: ${i.status}`, i.status === 'failed');
     case 'web_search': return done ? tool('Search', { description: i.query }) : [];
     case 'error': return result(i.message, true);
     default: return [];
