@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxSettings, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, footprintPolicy, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxSettings, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -182,6 +182,15 @@ test('a worktree of a submodule repo: its own core.worktree when the extension w
     sound(`${dir}/plain2`);
     assert.throws(() => own(`${dir}/plain2`));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('worker footprint policy follows the project, with shared paths independent of overlap', () => {
+  for (const overlap of [undefined, false, true]) for (const sharedPaths of [[], ['spec/', 'notes.md']]) {
+    const policy = footprintPolicy({ overlap, sharedPaths });
+    assert.equal(policy.includes('spec/, notes.md'), !!sharedPaths.length);
+    assert.equal(policy.includes('Add any other missing paths'), overlap === true);
+    assert.equal(policy.includes('add needs-human and stop'), overlap !== true);
+  }
 });
 
 test('first prompt: the agent instructions and the issue; project guidance only when the project has it', () => {

@@ -287,6 +287,14 @@ export function repoMap(paths, budget = 40000) {
   }
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
 }
+export const footprintPolicy = p => [
+  'Current project footprint policy (also applies on resume):',
+  ...(p.sharedPaths?.length ? [`For this issue's work, paths equal to or under these shared paths need no footprint entry or approval: ${p.sharedPaths.join(', ')}.`] : []),
+  p.overlap === true ? 'Add any other missing paths required by the agreed task to its current footprint before editing. Keep the other required entries; do not park for a path alone.'
+    : 'For missing non-shared paths, explain why in an issue comment, add needs-human and stop; do not widen the footprint yourself.',
+  'This policy does not authorize expanding the task itself.',
+].join(' ');
+
 // The first prompt of an agent on an issue: its own instructions (project-independent), the issue, and what only this
 // project's repo needs (p.instructions).
 export const firstPrompt = (a, p, i) => `${a.instructions}\n\nYour issue: ${i.identifier}. Repo ${p.repo}, base branch \`${p.base}\`.` +
@@ -460,8 +468,8 @@ function start(p, i, runs, a) {
   r.provider = a.provider;
   if (first) r.session = a.provider === 'codex' ? null : randomUUID();
   if (!(r.wt ??= worktree(p, i.identifier))) { delete runs[i.identifier]; i.labels.push(CFG.humanLabel); return; } // parked on the next tick
-  const prompt = first ? firstPrompt(a, p, i)
-    : `Continue issue ${i.identifier}: read its new comments and its labels first.`;
+  const prompt = (first ? firstPrompt(a, p, i)
+    : `Continue issue ${i.identifier}: read its new comments and its labels first.`) + `\n\n${footprintPolicy(p)}`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
   // A new run reads every comment on its own; the inbox is for what comes while it runs (listen()).
   const last = try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new

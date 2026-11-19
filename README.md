@@ -29,9 +29,9 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
   named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (estimated if
   missing) that overlaps an issue of the same project that is `active` or `in_review` (not in a project with `overlap`, below).
-  If the estimated footprint misses paths needed for the requested work, the worker lists them and explains why in a
-  comment on the same issue, adds `needs-human` and stops. The maintainer can update the footprint and remove the label
-  to make the issue eligible again.
+  Each worker run, including a resume, gets the project's footprint policy. Work within the agreed task under
+  `sharedPaths` needs no footprint entry. With `overlap: true` the worker adds other missing required paths before editing,
+  preserving the rest of the footprint. Otherwise it explains the missing non-shared paths, adds `needs-human` and stops.
 - **Agents:** one JSON file each (`name`, `model`, `description`, `instructions`) in `agents/` — `worker`, a
   project-independent worker that takes the process from the repo's `AGENTS.md`, and `orchestrator` — plus your own in
   `local/agents/` (gitignored; `agents` in `config.json` names another directory; a file with the same `name` replaces
