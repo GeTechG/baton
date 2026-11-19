@@ -29,6 +29,9 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
   named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (estimated if
   missing) that overlaps an issue of the same project that is `active` or `in_review` (not in a project with `overlap`, below).
+  If the estimated footprint misses paths needed for the requested work, the worker lists them and explains why in a
+  comment on the same issue, adds `needs-human` and stops. The maintainer can update the footprint and remove the label
+  to make the issue eligible again.
 - **Agents:** one JSON file each (`name`, `model`, `description`, `instructions`) in `agents/` — `worker`, a
   project-independent worker that takes the process from the repo's `AGENTS.md`, and `orchestrator` — plus your own in
   `local/agents/` (gitignored; `agents` in `config.json` names another directory; a file with the same `name` replaces
@@ -210,7 +213,7 @@ copy `agents/worker.json` to `local/agents/worker.json` and add `"provider": "co
 The orchestrator's provider handles both wave selection and footprint estimation. Local profiles can specify `model`
 as a model name for the selected provider, or as an object keyed by provider. Check any local profiles with a fixed
 model name when switching providers. Set `codexEffort` in each agent's JSON profile to choose its reasoning effort.
-The bundled Codex worker uses `gpt-6.2-astra` with `high` effort for new and resumed runs.
+The bundled Codex worker uses `gpt-6.2-sol` with `max` effort for new and resumed runs.
 The orchestrator uses `gpt-6.2-sol` with `medium` effort for both wave selection and footprint estimates.
 
 Claude workers use `agent.cmd` and Claude's session and hook flags. Codex workers use `codex exec --approve-for-me --json`

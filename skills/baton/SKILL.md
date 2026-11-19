@@ -35,7 +35,8 @@ fighting the scheduler.
 - Stay inside the issue's `footprint`. It is how baton keeps parallel agents off each other's files (a project may let
   them overlap: then another issue may be changing the same files, and a merge conflict is yours to resolve). Once you know
   which paths the change really touches, narrow it to them (`--set footprint=…`): other issues can then start beside
-  yours. Never widen it; what needs a path outside it is a separate issue.
+  yours. If the planned work needs more paths, list them and explain why in a comment on the same issue, add
+  `needs-human` and stop. The maintainer can widen the footprint and remove the label to resume the issue.
 - Don't touch an issue worktree (`<checkout>.wt/<KEY>`) that is not yours.
 - An issue is done as planned. What comes up on the way: same area, small and needing no decision — done in the same
   issue and mentioned in the comment; same area but larger, or unrelated — a separate issue; work for another project —
