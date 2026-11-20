@@ -73,9 +73,9 @@ now and which agent takes each. An issue can be picked only when all of these ho
 
 So a new issue can start as soon as a slot comes free, and a clear title and description are what the orchestrator
 orders work by. An issue the orchestrator passes over is not offered again until the issues change or a person
-comments on it. When it decides an issue must wait for another one, it links that one as a blocker; when only a person
-can settle it (a duplicate, an obsolete or unclear issue), it adds `needs-human`. Either way a `Bridge:` comment on the
-issue says why: remove the link or the label if you disagree.
+comments on it. When it decides an issue must wait for another one, it links that one as a blocker. Requests to compare
+two open issues as possible duplicates or to resolve an obsolete or unclear issue receive `needs-human`. A `Bridge:`
+comment explains each decision.
 
 ## Issue properties and labels
 
@@ -110,6 +110,12 @@ lific issue link <BLOCKER-KEY> <KEY>                     # KEY waits for BLOCKER
 lific issue update <KEY> --status done                   # delivered; unblocks what waits on it
 lific issue update <KEY> --add-label needs-human         # park for a human
 ```
+
+For a defect, search first with `lific search --project <PREFIX> <failing check or symptom>`. Add new reproduction
+evidence to a confirmed open match. For a new defect inside a baton worker, use
+`lific issue report --project <PREFIX> --signature <failure-slug> --title <TITLE> --description <DETAILS> --footprint <PATHS>`.
+Choose the lowercase slug from the failing operation and observed symptom. Workers that submit the same signature in
+the same project get one open issue. Use the returned issue key when linking dependencies or recording what you found.
 
 Add `--json` for scripts. Against a running server pass `--backend http` with `LIFIC_URL` and `LIFIC_API_KEY` set
 (agents started by baton get a `lific` on their PATH that already does).

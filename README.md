@@ -23,8 +23,9 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   `[]` = never); after that its answers stand until something changes.
   For an issue it leaves out it may also fix the board, with a line baton applies and explains in a `Bridge:` comment
   on the issue: `<KEY> after <OTHER>` makes the open issue OTHER its blocker (not one that would close a cycle),
-  `<KEY> human` adds `needs-human` (a duplicate, an obsolete or unclear issue: closing it is a person's call).
-  `bridge.log` shows each as `fix`.
+  `<KEY> duplicate <OTHER>` asks a person to compare two open issues, and `<KEY> human` asks for a decision about an
+  obsolete or unclear issue. Both requests add `needs-human`. Baton shows linked duplicates with their current
+  statuses and checks that a proposed duplicate is still open before parking an issue. `bridge.log` shows each action as `fix`.
 - **Hard gates** the orchestrator cannot override: `backlog` (move it to `todo`), open blockers (Lific's native
   "blocked by" links, across projects too), the `needs-human` label, an assignment to a person (Lific's "any person" or
   named people; an unassigned issue is the agents', and a running one assigned to a person parks), and a `footprint` property (estimated if
@@ -111,6 +112,24 @@ bin/lific service stop      # stop the tracker (it returns on reboot)
 ```
 
 baton does not survive a reboot: run `scripts/up.sh` again. After `git pull`: `scripts/down.sh && scripts/up.sh`.
+
+## Reporting a defect from a worker
+
+Search the project with `lific search --project <PREFIX> <failing check or symptom>`. Review likely open matches and
+add new reproduction steps or test cases to the matching issue. For a new defect, use the worker's `lific` wrapper.
+
+```sh
+lific issue report --project APP --signature snap-configure-closes-without-dialog \
+  --title 'Configure snap closes without opening the dialog' \
+  --description 'Open Snap, choose Configure snap, and press Enter. The menu closes and the dialog stays hidden.' \
+  --footprint editor/src/ --json
+```
+
+Build the lowercase signature from the failing operation and symptom. Use the same signature for reports on different
+commits or in different languages. The wrapper uses Linux `flock` to serialize the open-issue lookup and creation across
+workers of one baton instance. It creates a `todo` or comments on the existing issue with that signature in the project.
+Use the returned issue identifier in follow-ups and blocker links. JSON output includes `reused`. Multiple exact matches
+are reported for review. General work items still use `lific issue create`.
 
 ## Adding a project
 One entry in `config.json` `projects`, keyed by the Lific project name: `repo` and `base` (any branch; where the

@@ -357,14 +357,23 @@ test('wave: what a wave did not start stays out of the offer until the issues ch
 test('wave: the orchestrator fixes the board for issues it leaves out: a blocker link or a person, never a cycle', () => {
   const open = [issue('OS-1'), issue('OS-2'), issue('OS-3', { bb: ['OS-1'] }), issue('OS-4')];
   const keys = ['OS-1', 'OS-2', 'OS-4'];
-  assert.deepEqual(fixes('OS-2 after OS-1: same work as OS-1\n`OS-4 human`: duplicates OS-9', keys, open),
-    [{ key: 'OS-2', after: 'OS-1', why: 'same work as OS-1' }, { key: 'OS-4', why: 'duplicates OS-9' }]);
+  assert.deepEqual(fixes('OS-2 after OS-1: same work as OS-1\n`OS-4 human`: choose the target platform', keys, open),
+    [{ key: 'OS-2', after: 'OS-1', why: 'same work as OS-1' }, { key: 'OS-4', why: 'choose the target platform' }]);
   assert.deepEqual(fixes('OS-1 after OS-3: OS-3 first', keys, open), []); // OS-3 waits on OS-1 already
   assert.deepEqual(fixes('OS-2 after OS-4\nOS-4 after OS-2', keys, open), [{ key: 'OS-2', after: 'OS-4', why: 'no reason given' }]); // nor a new one
   assert.deepEqual(fixes('OS-2 after OS-2', keys, open), []);
   assert.deepEqual(fixes('OS-2 after OS-77: closed long ago', keys, open), []); // not an open issue
   assert.deepEqual(fixes('OS-3 human: not offered\nOS-1 worker\nnothing to start', keys, open), []); // not offered; picks and prose are not fixes
   assert.deepEqual(fixes('OS-1 human: a\nOS-1 after OS-2: b', keys, open), [{ key: 'OS-1', why: 'a' }]); // one fix per issue
+});
+
+test('wave: an unresolved duplicate can be referred to a person and a cancelled duplicate cannot park the original', () => {
+  const original = { ...issue('OS-1', { fp: 'src/menu.js' }), duplicated_by: ['OS-9'] };
+  const cancelled = { ...issue('OS-9'), status: 'cancelled' };
+  const open = [original, issue('OS-2'), cancelled], offeredKeys = ['OS-1', 'OS-2'];
+  assert.deepEqual(fixes('OS-2 duplicate OS-1: same error\nOS-1 duplicate OS-9: same error', offeredKeys, open),
+    [{ key: 'OS-2', duplicate: 'OS-1', why: 'same error' }]);
+  assert.match(offered(original, 'o/r', undefined, () => 'cancelled'), /OS-9 \(cancelled\)/);
 });
 
 test('wave: free slots are filled while other issues run; the offer skips what overlaps work in progress', () => {
@@ -471,6 +480,78 @@ test('agents\' lific wrapper: runs the tracker CLI on the HTTP backend with the 
   const r = spawnSync(wrap, ['comment', 'add', 'OS-1', '--content=it\'s "done"'], { env: { BATON_RUN: runMark('OS-1', 2) }, encoding: 'utf8' });
   assert.equal(r.status, 3);
   assert.deepEqual(JSON.parse(r.stdout), ['--backend', 'http', 'comment', 'add', 'OS-1', '--content=it\'s "done"\n\n<!-- baton OS-1 run 2 -->']);
+});
+
+async function reportTracker(t, initial = []) {
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util');
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs'), { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(`${tmpdir()}/baton-report-`), fake = `${dir}/tracker.cjs`, wrap = `${dir}/lific.cjs`, log = `${dir}/issues.jsonl`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(log, initial.map((row) => JSON.stringify(row) + '\n').join(''));
+  writeFileSync(fake, `#!${process.execPath}
+const { appendFileSync, readFileSync } = require('node:fs');
+const args = process.argv.slice(5), log = ${JSON.stringify(log)};
+const rows = () => readFileSync(log, 'utf8').split('\\n').filter(Boolean).map(JSON.parse);
+const option = (name) => args.find((arg) => arg.startsWith('--' + name + '='))?.split('=').slice(1).join('=');
+const emit = (row) => { appendFileSync(log, JSON.stringify(row) + '\\n'); console.log(JSON.stringify(row)); };
+if (args[0] === 'issue' && args[1] === 'list') {
+  console.log(JSON.stringify(rows().filter((row) => row.project === option('project') && row.status === option('status'))));
+} else if (args[0] === 'issue' && args[1] === 'create') {
+  setTimeout(() => emit({ identifier: option('project') + '-' + (rows().filter((row) => row.project === option('project')).length + 1), project: option('project'),
+    status: option('status'), title: option('title'), description: option('description'), properties: Object.fromEntries(args.filter((arg) =>
+      arg.startsWith('--set=')).map((arg) => arg.slice(6).split('='))) }), 150);
+} else if (args[0] === 'comment' && args[1] === 'add') {
+  emit({ issue: args[2], content: option('content') });
+} else { console.error('Unsupported: ' + args.join(' ')); process.exitCode = 1; }
+`, { mode: 0o755 });
+  writeFileSync(wrap, lificWrapper(process.execPath, fake), { mode: 0o755 });
+  const report = (source, title, signature, description, project = 'OS') => promisify(execFile)(wrap,
+    ['issue', 'report', '--project', project, '--signature', signature, '--title', title, '--description', description,
+      '--footprint', 'src/menu.js, test/menu.js', '--json'],
+    { env: { BATON_ISSUE: source, BATON_RUN: runMark(source, 1) }, timeout: 5000 });
+  return { report, rows: () => readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse) };
+}
+
+test('simultaneous worker reports about one defect create one issue and attach the other reproduction', async (t) => {
+  const { report, rows } = await reportTracker(t);
+  const results = await Promise.allSettled([
+    report('OS-21', 'Snap menu closes without opening the dialog', 'snap-configure-closes-without-dialog', 'Press Enter.'),
+    report('OS-22', 'Настройки привязки не открываются', 'snap-configure-closes-without-dialog', 'Click Configure snap.'),
+  ]);
+  assert.deepEqual(results.map((result) => result.status === 'fulfilled' ? JSON.parse(result.value.stdout).identifier : result.reason.stderr.trim()),
+    ['OS-1', 'OS-1']);
+  const [created, comment, extra] = rows();
+  assert.equal(extra, undefined);
+  assert.equal(created.properties['defect-signature'], 'snap-configure-closes-without-dialog');
+  assert.equal(created.properties.footprint, 'src/menu.js, test/menu.js');
+  const secondReport = created.description.includes('Press Enter.') ? ['OS-22', 'Click Configure snap.'] : ['OS-21', 'Press Enter.'];
+  assert.equal(comment.issue, 'OS-1');
+  assert.ok(comment.content.includes(secondReport[1]));
+  assert.ok(comment.content.includes(runMark(secondReport[0], 1)));
+});
+
+test('worker reports reuse an open issue only in the same project and leave other defects and closed issues alone', async (t) => {
+  const signature = 'roleclassesmain-filesystem-fields';
+  const initial = [
+    { identifier: 'OS-1', project: 'OS', status: 'cancelled', properties: { 'defect-signature': signature } },
+    { identifier: 'OS-2', project: 'OS', status: 'in_review', properties: { 'defect-signature': signature } },
+  ];
+  const { report, rows } = await reportTracker(t, initial);
+  const followup = JSON.parse((await report('OS-21', 'Filter Files', signature, 'Filter Files now adds a line edit.')).stdout);
+  const separate = JSON.parse((await report('OS-22', 'Other RoleClassesMain failure', 'roleclassesmain-role-label', 'Dialog label is missing.')).stdout);
+  const other = JSON.parse((await report('LIB-21', 'Filter Files', signature, 'Fails on the library fork.', 'LIB')).stdout);
+  assert.deepEqual([followup, separate, other].map(({ identifier, reused }) => [identifier, reused]),
+    [['OS-2', true], ['OS-3', false], ['LIB-1', false]]);
+  assert.deepEqual(rows().filter((row) => row.issue).map((row) => row.issue), ['OS-2']);
+});
+
+test('worker reports surface conflicting exact matches without mutating either issue', async (t) => {
+  const signature = 'roleclassesmain-filesystem-fields';
+  const initial = ['backlog', 'todo'].map((status, index) => ({ identifier: `OS-${index + 1}`, project: 'OS', status,
+    properties: { 'defect-signature': signature } }));
+  const { report, rows } = await reportTracker(t, initial);
+  await assert.rejects(report('OS-21', 'Filter Files', signature, 'Filter Files now adds a line edit.'), /OS-1, OS-2/);
+  assert.deepEqual(rows(), initial);
 });
 
 test('inbox hooks deliver each comment once to the main worker in the format its CLI expects', async (t) => {

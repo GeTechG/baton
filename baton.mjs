@@ -169,7 +169,8 @@ export function whyNot(i, flight, statusOf, shared = [], overlap = false) {
 }
 // The open issues as the last wave left them. A change of this (a slot came free, a new board order, an edited
 // issue) ends every refusal.
-export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy, i.sort_order, i.footprint, i.title, i.description]));
+export const snapshot = (issues) => JSON.stringify(issues.map((i) => [i.identifier, i.status, i.agent, i.labels, i.blockedBy,
+  i.duplicates, i.duplicated_by, i.sort_order, i.footprint, i.title, i.description]));
 // Refused = offered to a wave and not started, kept as key -> people's comments then. A refused issue is not offered
 // again, so the next wave is asked about the ones behind it (one refused issue overlapping the rest held the whole
 // queue). The refusal lasts while the issues stand as they were (same) and nobody comments on it (saidOf(key)).
@@ -181,16 +182,21 @@ export const stillRefused = (refused, same, saidOf) => same ? Object.fromEntries
 // round in a row. Past the last pause the answers stand until something changes.
 export const again = (empties, sec, pauses = CFG.waveRetrySec) => empties > 0 && sec >= pauses[empties - 1];
 // The orchestrator's fixes for the offered issues it leaves out (lines picks() does not take): `<KEY> after <OTHER>: why`
-// = OTHER, an open issue that does not itself wait on KEY, becomes KEY's blocker; `<KEY> human: why` = for a person.
+// links a blocker, `<KEY> duplicate <OTHER>: why` asks a person about two open issues, and `<KEY> human: why` asks a person directly.
 export function fixes(out, keys, open) {
-  const by = Object.fromEntries(open.map((i) => [i.identifier, [...i.blockedBy]])), res = [];
+  const by = Object.fromEntries(open.filter((i) => !CLOSED.includes(i.status)).map((i) => [i.identifier, [...i.blockedBy]])), res = [];
   const waits = (k, on, seen = new Set()) => k === on || (!seen.has(k) && (seen.add(k), (by[k] ?? []).some((b) => waits(b, on, seen))));
   for (const l of out.split('\n')) {
-    const m = /^\W*([A-Z][A-Z0-9]*-\d+)\s+(?:after\s+([A-Z][A-Z0-9]*-\d+)|human)\b\W*(.*)$/i.exec(l.replace(/[`*]/g, ''));
-    if (!m || !keys.includes(m[1]) || res.some((r) => r.key === m[1])) continue;
-    const why = m[3].trim().slice(0, 300) || 'no reason given';
-    if (!m[2]) res.push({ key: m[1], why });
-    else if (by[m[2]] && !waits(m[2], m[1])) by[m[1]]?.push(m[2]), res.push({ key: m[1], after: m[2], why });
+    const m = /^\W*([A-Z][A-Z0-9]*-\d+)\s+(?:(after|duplicate)\s+([A-Z][A-Z0-9]*-\d+)|human)\b\W*(.*)$/i.exec(l.replace(/[`*]/g, ''));
+    if (!m) continue;
+    const [, key, action, other, reason] = m;
+    if (!keys.includes(key) || res.some((r) => r.key === key)) continue;
+    const why = reason.trim().slice(0, 300) || 'no reason given';
+    if (!action) res.push({ key, why });
+    else if (by[other] && other !== key) {
+      if (action.toLowerCase() === 'duplicate') res.push({ key, duplicate: other, why });
+      else if (!waits(other, key)) by[key]?.push(other), res.push({ key, after: other, why });
+    }
   }
   return res;
 }
@@ -212,6 +218,7 @@ export const slots = (issues, max = CFG.maxWave) => max - issues.filter((i) => i
 // waiting its footprint overlaps (a project with `overlap` only).
 export const offered = (i, repo, r, statusOf) => `## ${i.identifier} [${repo}] ${i.title}\nstatus: ${r ? `started earlier by ${r.agent}, parked` : 'todo (not started)'}; ` +
   `labels: ${i.labels.join(', ') || '-'}; footprint: ${i.footprint.join(', ') || '-'}${i.shares?.length ? ` (overlaps ${i.shares.join(', ')})` : ''}; blockers: ${i.blockedBy.map((k) => `${k} (${statusOf(k)})`).join(', ') || 'none'}\n${i.description ?? ''}` +
+  (i.duplicated_by?.length ? `\nDuplicate reports for this issue: ${i.duplicated_by.map((k) => `${k} (${statusOf(k)})`).join(', ')}` : '') +
   (i.said?.length ? `\nComments from people since (latest last; they may settle what the description leaves open):\n${i.said.map((c) => `- ${c}`).join('\n')}` : '');
 // What people wrote on a waiting issue, for the orchestrator (a decision is often given in a comment, not in the
 // description): the last `n` comments not by the agents' tracker user, oldest first, one capped line each.
@@ -244,11 +251,55 @@ export function marked(args, mark) {
   if (!mark || at < 0) return args;
   return args.map((a, k) => (k < at + 2 ? a : ['--content', '-c'].includes(args[k - 1]) || /^(--content=|-c.)/.test(a) ? add(a) : a));
 }
-// The agents' `lific` (a CommonJS script for `node`, saved as .cjs: state/ is under baton's "type": "module"): the tracker CLI on the HTTP backend (URL and key come from the env), comments marked.
+function matchingReport(issues, signature) {
+  const matches = new Map(issues.filter((i) => i.properties?.['defect-signature'] === signature).map((i) => [i.identifier, i]));
+  if (matches.size > 1) throw new Error(`More than one open issue has defect signature ${signature}: ${[...matches.keys()].join(', ')}`);
+  return matches.values().next().value;
+}
+// Runs under the worker wrapper's flock. Keep lookup and creation together even if two workers took the same report path.
+function reportIssue(bin, args) {
+  const { parseArgs } = require('node:util'), { execFileSync } = require('node:child_process');
+  const { values } = parseArgs({ args, options: { project: { type: 'string', short: 'p' }, signature: { type: 'string' },
+    title: { type: 'string', short: 't' }, description: { type: 'string', short: 'd' }, footprint: { type: 'string' },
+    json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
+  if (values.help) {
+    console.log('Usage: lific issue report --project <PREFIX> --signature <DEFECT> --title <TITLE> --description <DETAILS> [--footprint <PATHS>] [--json]');
+    return;
+  }
+  const { project, signature, title, description, footprint } = values;
+  if (!project?.trim() || !title?.trim() || !description?.trim() || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(signature ?? '')) {
+    throw new Error('A defect report needs --project, --title, --description, and a lowercase --signature such as snap-configure-closes-without-dialog');
+  }
+  const tracker = (...a) => JSON.parse(execFileSync(bin, ['--backend', 'http', '--json', ...a],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 8 * 1024 * 1024 }));
+  const limit = 500;
+  const issues = ['backlog', 'todo', 'active', 'in_review'].flatMap((status) => {
+    const listed = tracker('issue', 'list', `--project=${project}`, `--status=${status}`, `--limit=${limit}`);
+    if (listed.length >= limit) throw new Error(`Cannot check all ${status} issues in ${project} for a duplicate`);
+    return listed;
+  });
+  const found = matchingReport(issues, signature), source = process.env.BATON_ISSUE;
+  const details = source ? `Found while working on ${source}.\n\n${description}` : description;
+  if (found) tracker(...marked(['comment', 'add', found.identifier, `--content=${title}\n\n${details}`], process.env.BATON_RUN));
+  const issue = found ?? tracker('issue', 'create', `--project=${project}`, '--status=todo', `--title=${title}`, `--description=${details}`,
+    `--set=defect-signature=${signature}`, ...(footprint ? [`--set=footprint=${footprint}`] : []));
+  console.log(values.json ? JSON.stringify({ ...issue, reused: Boolean(found) }) : `${found ? 'Reused' : 'Created'} ${issue.identifier}`);
+}
+// The agents' `lific` (saved as .cjs under baton's "type": "module") pins the HTTP backend and marks the run's comments.
 export const lificWrapper = (node, bin) => `#!${node}
 ${marked}
-const r = require('child_process').spawnSync(${JSON.stringify(bin)}, ['--backend', 'http', ...marked(process.argv.slice(2), process.env.BATON_RUN)], { stdio: 'inherit' });
+const bin = ${JSON.stringify(bin)}, args = process.argv.slice(2), offset = args[0] === '--json' ? 1 : 0;
+const report = args[offset] === 'issue' && args[offset + 1] === 'report';
+const reportCode = ${JSON.stringify(`${matchingReport}\n${marked}\n${reportIssue}
+try { reportIssue(process.argv[1], process.argv.slice(2)); }
+catch (error) { console.error(error.stderr?.trim() || error.message); process.exitCode = 1; }`)};
+const [command, argv] = report
+  ? ['flock', ['--no-fork', '--timeout', '30', '--conflict-exit-code', '75', __dirname + '/issue-report.lock', process.execPath, '--input-type=commonjs', '-e', reportCode,
+    '--', bin, ...args.slice(offset + 2), ...args.slice(0, offset)]]
+  : [bin, ['--backend', 'http', ...marked(args, process.env.BATON_RUN)]];
+const r = require('child_process').spawnSync(command, argv, { stdio: 'inherit' });
 if (r.error) console.error(r.error.message);
+if (report && r.status === 75) console.error('Timed out waiting for another worker to finish filing an issue');
 process.exitCode = r.status ?? 1;
 `;
 // What a running agent hears (r.heard = the newest comment id it has seen or was told of): the comments on its issue newer
@@ -294,6 +345,10 @@ export const footprintPolicy = p => [
     : 'For missing non-shared paths, explain why in an issue comment, add needs-human and stop; do not widen the footprint yourself.',
   'This policy does not authorize expanding the task itself.',
 ].join(' ');
+const reportPolicy = 'Before filing a defect, use `lific search --project <PREFIX> <failing check or symptom>` and inspect likely open matches. ' +
+  'Add new reproduction or test evidence to a confirmed match. Otherwise use `lific issue report --project <PREFIX> --signature <failure-slug> ' +
+  '--title <TITLE> --description <DETAILS> --footprint <PATHS>`. Choose the slug from the operation and exact observed failure, independent of the source issue and commit. ' +
+  'Use the issue key returned by the command for follow-up and blocker links.';
 
 // The first prompt of an agent on an issue: its own instructions (project-independent), the issue, and what only this
 // project's repo needs (p.instructions).
@@ -469,7 +524,7 @@ function start(p, i, runs, a) {
   if (first) r.session = a.provider === 'codex' ? null : randomUUID();
   if (!(r.wt ??= worktree(p, i.identifier))) { delete runs[i.identifier]; i.labels.push(CFG.humanLabel); return; } // parked on the next tick
   const prompt = (first ? firstPrompt(a, p, i)
-    : `Continue issue ${i.identifier}: read its new comments and its labels first.`) + `\n\n${footprintPolicy(p)}`;
+    : `Continue issue ${i.identifier}: read its new comments and its labels first.`) + `\n\n${footprintPolicy(p)}\n\n${reportPolicy}`;
   mkdirSync(`${DIR}/logs`, { recursive: true });
   // A new run reads every comment on its own; the inbox is for what comes while it runs (listen()).
   const last = try_(() => tj('comment', 'list', i.identifier, '--limit', '1')); // null: this run hears nothing new
@@ -575,7 +630,9 @@ function orchestrate(projects, issues, waiting, agents, o, runs, statusOf, room)
     (o.instructions ? `# Maintainer's guidance\n${o.instructions}\n\n` : '') +
     'Reply with ONLY these lines, no other text: `<KEY> <agent name>` for each task to start. For a WAITING task you leave out ' +
     'because it must wait for another open task, add `<KEY> after <OTHER KEY>: <why>`: OTHER becomes its blocker and it is not ' +
-    'offered until OTHER closes. For one only a person can settle (a duplicate, an obsolete or unclear task), add `<KEY> human: <why>`. ' +
+    'offered until OTHER closes. For a possible duplicate of another open task use `<KEY> duplicate <OTHER KEY>: <why>`. ' +
+    'A linked duplicate marked cancelled is resolved, even if an older comment asks for a decision about it. ' +
+    'For a separate human decision about an obsolete or unclear task, use `<KEY> human: <why>`. Use the duplicate form for all suspected duplicates. ' +
     'If you start nothing and add no such line, reply with one line saying why.';
   return ask(o.provider, o.model || (o.provider === 'claude' ? 'sonnet' : null), prompt, o.codexEffort);
 }
@@ -835,8 +892,13 @@ function tick() {
   log(null, 'wave', wave.length ? wave.map((w) => w.key).join(',') : `nothing to start (${reason(out)})`, `of ${waiting.map((i) => i.identifier)}`);
   const picked = wave.map((w) => w.key);
   for (const f of fixes(out, waiting.map((i) => i.identifier).filter((k) => !picked.includes(k)), issues)) {
-    const done = try_(() => (f.after ? t('issue', 'link', f.after, f.key) : relabel(f.key, 'add', CFG.humanLabel),
-      comment(f.key, `Bridge: ${f.after ? `waits for ${f.after}` : 'for a person'} (the orchestrator: ${f.why})`), true));
+    const done = try_(() => {
+      if (f.duplicate && CLOSED.includes(tj('issue', 'get', f.duplicate).status)) return false;
+      if (f.after) t('issue', 'link', f.after, f.key); else relabel(f.key, 'add', CFG.humanLabel);
+      const outcome = f.after ? `waits for ${f.after}` : f.duplicate ? `for a person, possible duplicate of ${f.duplicate}` : 'for a person';
+      comment(f.key, `Bridge: ${outcome} (the orchestrator: ${f.why})`);
+      return true;
+    });
     log(null, 'fix', f.key, f.after ? `after ${f.after}` : CFG.humanLabel, done ? f.why : 'failed');
   }
   // The snapshot the next tick will see (its own starts are no change; the fixes are). A round ends when nothing is
