@@ -32,7 +32,11 @@ project turns on the land queue (`land`, below): then baton merges, gates and pu
   missing) that overlaps an issue of the same project that is `active` or `in_review` (not in a project with `overlap`, below).
   Each worker run, including a resume, gets the project's footprint policy. Work within the agreed task under
   `sharedPaths` needs no footprint entry. With `overlap: true` the worker adds other missing required paths before editing,
-  preserving the rest of the footprint. Otherwise it explains the missing non-shared paths, adds `needs-human` and stops.
+  preserving the rest of the footprint. Otherwise the worker requests the necessary paths on the issue and parks.
+  The project lead or an instance-wide `footprintApprovers` user can comment `делать`, `делай`, `Ок, делай`, or
+  `go ahead`. While the latest comment from an authorized approver is an approval, it also covers subsequent requests
+  within the same issue. Baton adds the requested paths to the existing footprint, clears that request's human hold,
+  and runs the issue when its normal blockers and overlap checks permit it.
 - **Agents:** one JSON file each (`name`, `model`, `description`, `instructions`) in `agents/` — `worker`, a
   project-independent worker that takes the process from the repo's `AGENTS.md`, and `orchestrator` — plus your own in
   `local/agents/` (gitignored; `agents` in `config.json` names another directory; a file with the same `name` replaces
@@ -150,6 +154,9 @@ the merge conflicts are the agents' to resolve (meant for a project with `land`)
 compared: the orchestrator sees, next to a waiting issue's footprint, the issues in work or waiting it overlaps
 (`footprint: src/a.js (overlaps APP-3)`), and is told an overlap alone is no reason to wait, only work that would redo
 or undo the other issue's.
+
+`footprintApprovers` is an optional top-level array of Lific user IDs allowed to authorize footprint expansion in all
+configured projects. Each project's Lific lead can authorize its issues. The worker account cannot authorize expansion.
 
 `setup` is a shell command baton runs in an issue's worktree right after creating it, before the agent starts (so also
 after the `fresh` label; not on later runs in the kept worktree): what the repo needs before a session and its MCP

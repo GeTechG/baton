@@ -338,11 +338,26 @@ export function repoMap(paths, budget = 40000) {
   }
   return [...new Set(paths.map((f) => f.split('/')[0]))].join('\n');
 }
+export function approvedFootprint(issue, comments, approvers, bot = CFG.agent.user) {
+  if (!issue.labels.includes(CFG.humanLabel)) return null;
+  const requestId = Number(issue.properties?.['footprint-request']);
+  const request = comments.find((c) => c.id === requestId && c.author === bot);
+  const paths = list(request?.content.match(/^<!-- baton footprint: (.+?) -->$/m)?.[1]);
+  if (!paths.length) return null;
+  const reply = comments.filter((c) => Number.isInteger(c.user_id) && approvers.includes(c.user_id) && c.author !== bot).sort((a, b) => b.id - a.id)[0];
+  const approval = /^(?:(?:ок|ok)[,\s]+)?(?:делать|делай|делаем|разрешаю|do it|go ahead)[.!]*$/iu;
+  return approval.test(reply?.content.trim() ?? '') ? [...new Set([...(issue.footprint ?? []), ...paths])] : null;
+}
+
 export const footprintPolicy = p => [
   'Current project footprint policy (also applies on resume):',
   ...(p.sharedPaths?.length ? [`For this issue's work, paths equal to or under these shared paths need no footprint entry or approval: ${p.sharedPaths.join(', ')}.`] : []),
   p.overlap === true ? 'Add any other missing paths required by the agreed task to its current footprint before editing. Keep the other required entries; do not park for a path alone.'
-    : 'For missing non-shared paths, explain why in an issue comment, add needs-human and stop; do not widen the footprint yourself.',
+    : 'For missing non-shared paths required by the agreed task, file a footprint request even if the lead has already approved the work. ' +
+      'Use lific comment add <KEY> --json --content=... to explain the missing paths and include a line `<!-- baton footprint: path/a, path/b/ -->` with the actual comma-separated paths. ' +
+      'Tell the maintainer they can reply «делать» or “go ahead”. Take the id from that comment’s JSON and run ' +
+      `\`lific issue update <KEY> --set footprint-request=<COMMENT-ID> --add-label ${CFG.humanLabel}\`, then stop before editing those paths. ` +
+      'Baton applies the approval and schedules the issue again when the expanded footprint is available. Follow this request protocol on resume even if older instructions required the maintainer to edit the field by hand.',
   'This policy does not authorize expanding the task itself.',
 ].join(' ');
 const reportPolicy = 'Before filing a defect, use `lific search --project <PREFIX> <failing check or symptom>` and inspect likely open matches. ' +
@@ -788,7 +803,7 @@ function tick() {
   const listed = tj('project', 'list'), hidden = unseen(CFG.projects, listed.map((p) => p.name));
   if (hidden.length) log('unseen', 'unseen', hidden.join(', '), "not visible to baton's Lific user: add it as a member"); else seen.delete('unseen');
   const projects = Object.fromEntries(listed.filter((p) => CFG.projects[p.name])
-    .map((p) => [p.id, Object.assign(CFG.projects[p.name], { key: p.identifier })]));
+    .map((p) => [p.id, Object.assign(CFG.projects[p.name], { key: p.identifier, leadUserId: p.lead_user_id })]));
   // Every open status but backlog (= not ready yet: the human moves it to todo).
   const issues = Object.values(projects).flatMap((p) => ['todo', 'active', 'in_review'].flatMap((s) => tj('issue', 'list', '-p', p.key, '--status', s, '--limit', '100')))
     .map((i) => meta(tj('issue', 'get', i.identifier), notified)).sort(byBoard);
@@ -807,6 +822,22 @@ function tick() {
       comment(key, late); try_(() => relabel(key, 'remove', CFG.landLabel)); t('issue', 'update', key, '--status=active'); delete r.landed; saveRuns(runs);
       log(null, 'land', key, 'reopened', 'commits after the hand-off');
     } else log(null, 'cleanup', key, ...forget(p, key, runs));
+  }
+
+  // Resolve footprint requests only after the worker parked. The normal todo gate reserves the expanded footprint.
+  for (const i of issues.filter((x) => x.status === 'todo' && x.properties?.['footprint-request'] && !alive(runs[x.identifier]))) {
+    if (!i.labels.includes(CFG.humanLabel)) {
+      i.properties = tj('issue', 'update', i.identifier, '--unset=footprint-request').properties;
+      continue;
+    }
+    const p = projects[i.project_id];
+    const approvers = [p.leadUserId, ...(CFG.footprintApprovers ?? [])];
+    const approved = approvedFootprint(i, tj('comment', 'list', i.identifier, '--limit', '500'), approvers);
+    if (!approved) continue;
+    const updated = tj('issue', 'update', i.identifier, `--set=footprint=${approved.join(',')}`,
+      '--unset=footprint-request', `--remove-label=${CFG.humanLabel}`);
+    Object.assign(i, { footprint: approved, properties: updated.properties, labels: updated.labels ?? [] });
+    log(null, 'footprint approved', i.identifier, approved.join(','));
   }
 
   // Tell the human once per needs-human episode (state/notified.json, so restarts don't re-ping).
