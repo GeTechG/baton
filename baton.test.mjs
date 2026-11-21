@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, footprintPolicy, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxSettings, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
+import { list, overlaps, meta, whyNot, clashes, landDefer, notifyStep, repoMap, freshStep, runStep, limitedUntil, agentEnv, agentPath, tail, holder, snapshot, refuse, stillRefused, again, fixes, offer, slots, offered, said, team, picks, reason, oneShot, profile, sameAgent, runCommand, codexThread, codexOneShot, byBoard, footprintPolicy, approvedFootprint, firstPrompt, setup, reap, milestoneDue, landedWork, redStages, culprit, excerpt, fixIssue, landable, lateWork, landDue, probe, landStages, landCmd, bounced, news, inboxSettings, inboxHook, runMark, marked, lificWrapper, unseen, ownBranch, addTree } from './baton.mjs';
 
 const issue = (key, props = {}, labels = [], project_id = 'app') => meta({ identifier: key, project_id, labels, status: 'todo',
   properties: { ...(props.fp == null ? {} : { footprint: props.fp }), ...(props.agent ? { agent: props.agent } : {}) }, blocked_by: props.bb });
@@ -189,8 +189,34 @@ test('worker footprint policy follows the project, with shared paths independent
     const policy = footprintPolicy({ overlap, sharedPaths });
     assert.equal(policy.includes('spec/, notes.md'), !!sharedPaths.length);
     assert.equal(policy.includes('Add any other missing paths'), overlap === true);
-    assert.equal(policy.includes('add needs-human and stop'), overlap !== true);
+    assert.equal(policy.includes('footprint-request'), overlap !== true);
   }
+});
+
+test('a project lead or instance-wide approver can approve a pending footprint request in advance', () => {
+  const issue = { footprint: ['src/Parser.js', 'tests/'], labels: ['needs-human'], properties: { 'footprint-request': '20' } };
+  const request = { id: 20, author: 'agent', user_id: 3, content: 'The parser spec is required.\n<!-- baton footprint: tests/, spec/parser/ -->' };
+  const lead = { id: 21, author: 'maintainer', user_id: 1, content: 'Ок, делай!' };
+  const approved = ['src/Parser.js', 'tests/', 'spec/parser/'];
+  assert.deepEqual(approvedFootprint(issue, [lead, request], [1]), approved);
+  assert.deepEqual(approvedFootprint(issue, [{ ...lead, content: 'делать' }, request], [1]), approved);
+  assert.deepEqual(approvedFootprint(issue, [request, { ...lead, id: 19 }], [1]), approved);
+  assert.equal(approvedFootprint(issue, [{ ...lead, author: 'agent' }, request], [1]), null);
+  assert.equal(approvedFootprint(issue, [{ ...lead, user_id: 2 }, request], [1]), null);
+  assert.deepEqual(approvedFootprint(issue, [lead, request], [3, 1]), approved);
+  assert.equal(approvedFootprint(issue, [{ ...lead, user_id: null }, request], [null]), null);
+  assert.equal(approvedFootprint(issue, [{ ...lead, id: 22, content: 'Не делать' }, lead, request], [1]), null);
+  assert.equal(approvedFootprint(issue, [lead, { ...request, author: 'maintainer' }], [1]), null);
+  assert.equal(approvedFootprint(issue, [lead, { ...request, content: '' }], [1]), null);
+  assert.equal(approvedFootprint({ ...issue, properties: {} }, [lead, request], [1]), null);
+  assert.equal(approvedFootprint({ ...issue, labels: [] }, [lead, request], [1]), null);
+});
+
+test('an approved expansion still waits for conflicting work', () => {
+  const waiting = { project_id: 1, blockedBy: [], labels: [], footprint: ['src/Parser.js', 'spec/parser/'] };
+  const held = { project_id: 1, identifier: 'APP-52', footprint: ['spec/'] };
+  assert.equal(whyNot(waiting, [held], () => ''), 'footprint overlaps APP-52');
+  assert.equal(whyNot(waiting, [], () => ''), null);
 });
 
 test('first prompt: the agent instructions and the issue; project guidance only when the project has it', () => {

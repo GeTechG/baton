@@ -34,8 +34,13 @@ fighting the scheduler.
   hold is fine: it stays in flight under its new agent.
 - Keep the footprint accurate for the agreed task. Paths at or under the project's `sharedPaths` need no entry.
   With `overlap: true`, add other necessary paths before editing: read the current footprint, keep its other required
-  entries and use `--set footprint=…`. Without overlap, explain missing non-shared paths, add `needs-human` and stop.
-  Neither exception expands the task itself.
+  entries and use `--set footprint=…`. Without overlap, request any missing non-shared paths before editing them.
+  Post a comment explaining why, with a separate line `<!-- baton footprint: path/a, path/b/ -->` containing the
+  actual comma-separated paths. Use `lific comment add --json` to get its ID, then
+  `lific issue update <KEY> --set footprint-request=<COMMENT-ID> --add-label needs-human` and stop.
+  An authorized maintainer's latest reply of `делать`, `Ок, делай`, or `go ahead` also covers later requests in the
+  same issue. Baton applies the expansion and schedules the issue when the paths are available.
+  Keep the requested paths within the agreed task.
 - Don't touch an issue worktree (`<checkout>.wt/<KEY>`) that is not yours.
 - An issue is done as planned. What comes up on the way: same area, small and needing no decision — done in the same
   issue and mentioned in the comment; same area but larger, or unrelated — a separate issue; work for another project —
